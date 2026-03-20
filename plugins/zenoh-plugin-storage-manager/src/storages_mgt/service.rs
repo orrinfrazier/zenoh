@@ -554,6 +554,87 @@ impl StorageService {
 
         let prefix = self.configuration.strip_prefix.as_ref();
 
+        // Handle acknowledged put/delete operations
+        let is_ack_put = q
+            .parameters()
+            .get("_ack_put")
+            .is_some_and(|v| v == "true");
+        let is_ack_delete = q
+            .parameters()
+            .get("_ack_delete")
+            .is_some_and(|v| v == "true");
+
+        if is_ack_put || is_ack_delete {
+            let stripped_key = match crate::strip_prefix(prefix, q.key_expr()) {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    let _ = q.reply_err(ZBytes::from(format!("{e}"))).await;
+                    return;
+                }
+            };
+
+            let timestamp = self.session.new_timestamp();
+            let mut storage = self.storage.lock().await;
+
+            let result = if is_ack_put {
+                let Some(payload) = q.payload() else {
+                    drop(storage);
+                    let _ = q
+                        .reply_err(ZBytes::from("_ack_put requires a payload"))
+                        .await;
+                    return;
+                };
+                let encoding = q.encoding().cloned().unwrap_or_default();
+                storage
+                    .put(
+                        stripped_key,
+                        payload.clone(),
+                        encoding,
+                        timestamp,
+                    )
+                    .await
+            } else {
+                storage.delete(stripped_key, timestamp).await
+            };
+
+            drop(storage);
+
+            let op = if is_ack_put { "ack_put" } else { "ack_delete" };
+            match result {
+                Ok(insertion_result) => {
+                    tracing::debug!(
+                        "[STORAGE] {} on '{}': {:?}",
+                        op,
+                        q.key_expr(),
+                        insertion_result
+                    );
+                    if let Err(e) = q
+                        .reply(q.key_expr().clone(), [insertion_result as u8])
+                        .await
+                    {
+                        tracing::warn!(
+                            "Storage '{}' raised an error replying to {}: {}",
+                            self.name,
+                            op,
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Storage '{}' raised an error on {}: {}",
+                        self.name,
+                        op,
+                        e
+                    );
+                    let _ = q.reply_err(ZBytes::from(format!("{e}"))).await;
+                }
+            }
+
+            return;
+        }
+
         if q.key_expr().is_wild() {
             // resolve key expr into individual keys
             let matching_keys = self.get_matching_keys(q.key_expr()).await;
