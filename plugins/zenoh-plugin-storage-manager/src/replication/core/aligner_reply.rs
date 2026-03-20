@@ -36,6 +36,16 @@ use crate::{
     storages_mgt::service::Update,
 };
 
+/// A single item in a batched retrieval reply, containing the event metadata and its optional
+/// payload and encoding bytes. For `Delete` and `WildcardDelete` actions, `payload` and
+/// `encoding` are `None`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct RetrievalItem {
+    pub(crate) event_metadata: EventMetadata,
+    pub(crate) payload: Option<Vec<u8>>,
+    pub(crate) encoding: Option<Vec<u8>>,
+}
+
 /// The `AlignmentReply` enumeration contains the possible information needed by a Replica to align
 /// its storage.
 ///
@@ -55,6 +65,8 @@ pub(crate) enum AlignmentReply {
     SubIntervals(HashMap<IntervalIdx, HashMap<SubIntervalIdx, Fingerprint>>),
     EventsMetadata(Vec<EventMetadata>),
     Retrieval(EventMetadata),
+    /// Batched retrieval: multiple events with their payloads in a single reply.
+    RetrievalBatch(Vec<RetrievalItem>),
 }
 
 impl Replication {
@@ -218,12 +230,32 @@ impl Replication {
                 if !diff_events.is_empty() {
                     self.spawn_query_replica_aligner(
                         replica_aligner_ke,
-                        AlignmentQuery::Events(diff_events),
+                        AlignmentQuery::EventsBatch(diff_events),
                     );
                 }
             }
             AlignmentReply::Retrieval(replica_event) => {
-                self.process_event_retrieval(replica_event, sample).await;
+                let SampleFields {
+                    payload, encoding, ..
+                } = sample.into();
+                self.process_event_retrieval(replica_event, payload, encoding)
+                    .await;
+            }
+            AlignmentReply::RetrievalBatch(items) => {
+                for item in items {
+                    let payload = item
+                        .payload
+                        .map(ZBytes::from)
+                        .unwrap_or_default();
+                    let encoding = item
+                        .encoding
+                        .map(|bytes| {
+                            Encoding::from(String::from_utf8_lossy(&bytes).into_owned())
+                        })
+                        .unwrap_or_default();
+                    self.process_event_retrieval(item.event_metadata, payload, encoding)
+                        .await;
+                }
             }
         }
     }
@@ -318,7 +350,12 @@ impl Replication {
     /// That fact is true except for the initial alignment: the initial alignment bypasses all these
     /// steps and the Replica goes straight to sending all its Replication Log and data in its
     /// Storage. Including for the deleted events.
-    async fn process_event_retrieval(&self, replica_event: EventMetadata, sample: Sample) {
+    async fn process_event_retrieval(
+        &self,
+        replica_event: EventMetadata,
+        payload: ZBytes,
+        encoding: Encoding,
+    ) {
         tracing::trace!("Processing `AlignmentReply::Retrieval` for < {replica_event:?} >");
 
         if self
@@ -364,9 +401,6 @@ impl Replication {
                     .await;
             }
             Action::Put => {
-                let SampleFields {
-                    payload, encoding, ..
-                } = sample.into();
                 if matches!(
                     self.storage_service
                         .storage
@@ -390,9 +424,6 @@ impl Replication {
                 }
             }
             Action::WildcardPut(_) => {
-                let SampleFields {
-                    payload, encoding, ..
-                } = sample.into();
                 self.apply_wildcard_update(
                     &mut replication_log_guard,
                     &replica_event,
@@ -809,3 +840,7 @@ impl Replication {
         replication_log_guard.insert_event(event);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/aligner_reply.test.rs"]
+mod tests;
