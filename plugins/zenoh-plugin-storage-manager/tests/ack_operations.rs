@@ -178,6 +178,26 @@ async fn test_ack_operations() {
     let sample = replies[0].result().expect("Expected Ok reply");
     assert_eq!(sample.payload().try_to_string().unwrap(), "normal_value");
 
+    // --- Test 4: _ack_put without payload returns error reply ---
+    println!("--- Test: _ack_put without payload returns error ---");
+
+    let replies: Vec<Reply> = session
+        .get("ack/test/c?_ack_put=true")
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        replies.len(),
+        1,
+        "Expected exactly one reply (error) from _ack_put without payload"
+    );
+    assert!(
+        replies[0].result().is_err(),
+        "Expected error reply when _ack_put is called without a payload"
+    );
+
     drop(storage);
 }
 

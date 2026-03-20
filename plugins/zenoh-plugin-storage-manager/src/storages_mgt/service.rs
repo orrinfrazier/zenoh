@@ -565,6 +565,13 @@ impl StorageService {
             .is_some_and(|v| v == "true");
 
         if is_ack_put || is_ack_delete {
+            if is_ack_put && q.payload().is_none() {
+                let _ = q
+                    .reply_err(ZBytes::from("_ack_put requires a payload"))
+                    .await;
+                return;
+            }
+
             let stripped_key = match crate::strip_prefix(prefix, q.key_expr()) {
                 Ok(k) => k,
                 Err(e) => {
@@ -578,13 +585,7 @@ impl StorageService {
             let mut storage = self.storage.lock().await;
 
             let result = if is_ack_put {
-                let Some(payload) = q.payload() else {
-                    drop(storage);
-                    let _ = q
-                        .reply_err(ZBytes::from("_ack_put requires a payload"))
-                        .await;
-                    return;
-                };
+                let payload = q.payload().expect("validated above");
                 let encoding = q.encoding().cloned().unwrap_or_default();
                 storage
                     .put(
