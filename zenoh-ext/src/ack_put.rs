@@ -65,9 +65,12 @@ const ACK_DELETE_PARAM: &str = "_ack_delete=true";
 
 /// Parse a single-byte reply payload into a [`StorageInsertionResult`].
 fn parse_ack_reply(reply: Reply) -> ZResult<StorageInsertionResult> {
-    let sample = reply
-        .into_result()
-        .map_err(|err| -> zenoh::Error { format!("ack reply error: {:?}", err.payload()).into() })?;
+    let sample = reply.into_result().map_err(|err| -> zenoh::Error {
+        let payload = err.payload().to_bytes();
+        let len = payload.len();
+        let preview: &[u8] = if len <= 64 { &payload } else { &payload[..64] };
+        format!("ack reply error ({len} bytes): {preview:?}").into()
+    })?;
     let bytes = sample.payload().to_bytes();
     if bytes.len() != 1 {
         return Err(format!(
@@ -85,6 +88,9 @@ fn parse_ack_reply(reply: Reply) -> ZResult<StorageInsertionResult> {
 /// Internally calls `session.get()` with a `_ack_put=true` query parameter and
 /// the provided payload.  The storage queryable is expected to perform the write
 /// and reply with a single byte encoding the [`StorageInsertionResult`].
+///
+/// Only the first reply is used.  If multiple storage backends reply, the
+/// extras are dropped.
 pub async fn ack_put(
     session: &Session,
     key_expr: &KeyExpr<'_>,
@@ -116,6 +122,9 @@ pub async fn ack_put(
 /// Internally calls `session.get()` with a `_ack_delete=true` query parameter.
 /// The storage queryable is expected to perform the delete and reply with a
 /// single byte encoding the [`StorageInsertionResult`].
+///
+/// Only the first reply is used.  If multiple storage backends reply, the
+/// extras are dropped.
 pub async fn ack_delete(
     session: &Session,
     key_expr: &KeyExpr<'_>,
