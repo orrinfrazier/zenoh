@@ -21,7 +21,7 @@ use zenoh::{
     query::Query,
 };
 
-use super::aligner_reply::AlignmentReply;
+use super::aligner_reply::{AlignmentReply, RetrievalItem};
 use crate::replication::{
     classification::{IntervalIdx, SubIntervalIdx},
     core::Replication,
@@ -62,6 +62,9 @@ pub(crate) enum AlignmentQuery {
     SubIntervals(HashMap<IntervalIdx, HashSet<SubIntervalIdx>>),
     /// Request the Payload associated with the provided EventMetadata.
     Events(Vec<EventMetadata>),
+    /// Request the Payloads associated with the provided EventMetadata, signaling that the
+    /// requester supports batched replies via `AlignmentReply::RetrievalBatch`.
+    EventsBatch(Vec<EventMetadata>),
 }
 
 impl Replication {
@@ -166,6 +169,18 @@ impl Replication {
                 tracing::trace!("Processing `AlignmentQuery::Events`");
                 for event_to_retrieve in events_to_retrieve {
                     self.reply_event_retrieval(&query, event_to_retrieve).await;
+                }
+            }
+            AlignmentQuery::EventsBatch(events_to_retrieve) => {
+                tracing::trace!("Processing `AlignmentQuery::EventsBatch`");
+                let batch_size = self
+                    .replication_log
+                    .read()
+                    .await
+                    .configuration()
+                    .batch_size;
+                for chunk in chunk_events_for_batch_retrieval(&events_to_retrieve, batch_size) {
+                    self.reply_event_retrieval_batch(&query, chunk).await;
                 }
             }
         }
@@ -333,6 +348,95 @@ impl Replication {
 
         reply_to_query(query, AlignmentReply::Retrieval(event_to_retrieve), value).await;
     }
+
+    /// Replies to the [Query] with a batch of [RetrievalItem]s for the given chunk of events.
+    ///
+    /// For each event in the chunk, the payload is fetched from the appropriate source (Storage for
+    /// `Put`, wildcard_puts for `WildcardPut`, or `None` for `Delete`/`WildcardDelete`). All items
+    /// are then packed into a single `AlignmentReply::RetrievalBatch` reply.
+    pub(crate) async fn reply_event_retrieval_batch(
+        &self,
+        query: &Query,
+        events: &[EventMetadata],
+    ) {
+        let mut items = Vec::with_capacity(events.len());
+
+        for event in events {
+            let value = match &event.action {
+                Action::Delete | Action::WildcardDelete(_) => None,
+                Action::Put => {
+                    let stored_data = {
+                        let mut storage = self.storage_service.storage.lock().await;
+                        match storage.get(event.stripped_key.clone(), "").await {
+                            Ok(stored_data) => stored_data,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to retrieve data associated to key < {:?} >: {e:?}",
+                                    event.key_expr()
+                                );
+                                continue;
+                            }
+                        }
+                    };
+
+                    let requested_data = stored_data
+                        .into_iter()
+                        .find(|data| data.timestamp == *event.timestamp());
+                    match requested_data {
+                        Some(data) => Some((data.payload, data.encoding)),
+                        None => {
+                            tracing::debug!(
+                                "Found no data in the Storage associated to key < {:?} > with a \
+                                 Timestamp equal to: {}",
+                                event.key_expr(),
+                                event.timestamp()
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Action::WildcardPut(wildcard_ke) => {
+                    let wildcard_puts_guard = self.storage_service.wildcard_puts.read().await;
+
+                    if let Some(update) = wildcard_puts_guard.weight_at(wildcard_ke) {
+                        Some((update.payload().clone(), update.encoding().clone()))
+                    } else {
+                        tracing::error!(
+                            "Ignoring Wildcard Update < {wildcard_ke} >: found no associated \
+                             `Update`."
+                        );
+                        continue;
+                    }
+                }
+            };
+
+            let (payload, encoding) = match value {
+                Some((p, e)) => (Some(p.to_bytes().to_vec()), Some(e.to_string().into_bytes())),
+                None => (None, None),
+            };
+
+            items.push(RetrievalItem {
+                event_metadata: event.clone(),
+                payload,
+                encoding,
+            });
+        }
+
+        reply_to_query(query, AlignmentReply::RetrievalBatch(items), None).await;
+    }
+}
+
+/// Chunks a slice of [EventMetadata] into sub-slices of at most `batch_size` elements.
+///
+/// Returns an empty `Vec` if the input is empty.
+pub(crate) fn chunk_events_for_batch_retrieval(
+    events: &[EventMetadata],
+    batch_size: usize,
+) -> Vec<&[EventMetadata]> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+    events.chunks(batch_size).collect()
 }
 
 /// Replies to a Query, adding the [AlignmentReply] as an attachment and, if provided, the payload
@@ -361,3 +465,7 @@ async fn reply_to_query(query: &Query, reply: AlignmentReply, value: Option<(ZBy
         tracing::error!("Failed to reply to Query: {e:?}");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/aligner_query.test.rs"]
+mod tests;

@@ -523,6 +523,7 @@ impl Replication {
                     tracing::error!("Failed to query Aligner < {replica_aligner_ke} >: {e:?}");
                 }
                 Ok(reply_receiver) => {
+                    let mut received_reply = false;
                     while let Ok(reply) = reply_receiver.recv_async().await {
                         let sample = match reply.into_result() {
                             Ok(sample) => sample,
@@ -554,6 +555,7 @@ impl Replication {
                             }
                         };
 
+                        received_reply = true;
                         replication
                             .process_alignment_reply(
                                 replica_aligner_ke.clone(),
@@ -567,6 +569,21 @@ impl Replication {
                         // to discover / align with a single Replica so we break here.
                         if matches!(alignment_query, AlignmentQuery::Discovery) {
                             return;
+                        }
+                    }
+
+                    // Backward compatibility fallback: if an EventsBatch query received no
+                    // replies, the remote likely doesn't support batch retrieval. Retry with
+                    // the legacy Events query.
+                    if !received_reply {
+                        if let AlignmentQuery::EventsBatch(events) = alignment_query {
+                            tracing::debug!(
+                                "No replies to EventsBatch query, falling back to Events"
+                            );
+                            replication.spawn_query_replica_aligner(
+                                replica_aligner_ke,
+                                AlignmentQuery::Events(events),
+                            );
                         }
                     }
                 }

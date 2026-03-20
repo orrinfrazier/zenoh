@@ -54,6 +54,7 @@ fn test_insert() {
             hot: 1,
             warm: 5,
             propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
         },
     );
 
@@ -118,6 +119,7 @@ fn test_digest() {
             hot: 1,
             warm: 5,
             propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
         },
     );
 

@@ -79,6 +79,9 @@ pub struct ReplicaConfig {
     pub hot: u64,
     pub warm: u64,
     pub propagation_delay: Duration,
+    /// Number of events per batch in `AlignmentReply::RetrievalBatch` during alignment.
+    /// This is a performance tuning parameter and does NOT need to match across replicas.
+    pub batch_size: usize,
 }
 
 impl StructVersion for VolumeConfig {
@@ -149,6 +152,12 @@ impl Default for ReplicaConfig {
             //
             // ⚠️ THIS VALUE SHOULD BE THE SAME FOR ALL REPLICAS.
             propagation_delay: Duration::from_millis(250),
+            // The number of events per batch in `AlignmentReply::RetrievalBatch` during
+            // alignment retrieval. Higher values reduce the number of replies (and serialization
+            // overhead) but increase per-reply payload size.
+            //
+            // Unlike other fields, this value does NOT need to match across replicas.
+            batch_size: 100,
         }
     }
 }
@@ -608,6 +617,25 @@ impl StorageConfig {
                         bail!(
                             "Invalid type for field `warm` in `replica_config` of storage `{}`. \
                              Only integer values are accepted.",
+                            plugin_name
+                        )
+                    }
+                }
+                if let Some(p) = s.get("batch_size") {
+                    let p = p.to_string().parse::<usize>();
+                    if let Ok(p) = p {
+                        if p == 0 {
+                            bail!(
+                                "Invalid value for field `batch_size` in `replica_config` of \
+                                 storage `{}`. Value must be greater than 0.",
+                                plugin_name
+                            )
+                        }
+                        replication.batch_size = p;
+                    } else {
+                        bail!(
+                            "Invalid type for field `batch_size` in `replica_config` of \
+                             storage `{}`. Only integer values are accepted.",
                             plugin_name
                         )
                     }
