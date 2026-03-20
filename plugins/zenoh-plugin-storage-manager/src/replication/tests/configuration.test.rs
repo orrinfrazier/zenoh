@@ -30,6 +30,8 @@ fn test_lower_bounds() {
             warm: 5,
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate: None,
         },
     );
 
@@ -52,6 +54,8 @@ fn test_difference() {
         warm: 5,
         propagation_delay: Duration::from_millis(250),
         batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate: None,
     };
 
     let configuration_a = Configuration::new(
@@ -89,6 +93,8 @@ fn test_get_classification() {
             warm: 5,
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate: None,
         },
     );
 
@@ -165,6 +171,8 @@ fn piece1_batch_size_not_included_in_configuration_fingerprint() {
         warm: 30,
         propagation_delay: Duration::from_millis(250),
         batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate: None,
     };
 
     let config_b = ReplicaConfig {
@@ -174,6 +182,8 @@ fn piece1_batch_size_not_included_in_configuration_fingerprint() {
         warm: 30,
         propagation_delay: Duration::from_millis(250),
         batch_size: 500,
+        bloom_filter_capacity: None,
+        bloom_filter_fp_rate: None,
     };
 
     let configuration_a = Configuration::new(key_expr.clone(), None, config_a);
@@ -183,5 +193,31 @@ fn piece1_batch_size_not_included_in_configuration_fingerprint() {
         configuration_a.fingerprint(),
         configuration_b.fingerprint(),
         "Changing batch_size should NOT change the Configuration fingerprint"
+    );
+}
+
+#[test]
+fn bloom_filter_fields_not_included_in_configuration_fingerprint() {
+    let key_expr = OwnedKeyExpr::from_str("replication/test/**").unwrap();
+
+    let config_a = ReplicaConfig {
+        bloom_filter_capacity: None,
+        bloom_filter_fp_rate: None,
+        ..ReplicaConfig::default()
+    };
+
+    let config_b = ReplicaConfig {
+        bloom_filter_capacity: Some(1_000_000),
+        bloom_filter_fp_rate: Some(0.001),
+        ..ReplicaConfig::default()
+    };
+
+    let configuration_a = Configuration::new(key_expr.clone(), None, config_a);
+    let configuration_b = Configuration::new(key_expr, None, config_b);
+
+    assert_eq!(
+        configuration_a.fingerprint(),
+        configuration_b.fingerprint(),
+        "Changing bloom filter fields should NOT change the Configuration fingerprint"
     );
 }
