@@ -129,6 +129,7 @@ async fn ack_put_integration() {
 
     let replies: Vec<Reply> = session
         .get(&key_b)
+        .timeout(ACK_TIMEOUT)
         .await
         .unwrap()
         .into_iter()
@@ -152,6 +153,7 @@ async fn ack_put_integration() {
 
     let replies: Vec<Reply> = session
         .get(&key_c)
+        .timeout(ACK_TIMEOUT)
         .await
         .unwrap()
         .into_iter()
@@ -176,5 +178,4 @@ async fn ack_put_integration() {
         "ack_put over existing value should return Replaced"
     );
 
-    drop(_storage);
 }
