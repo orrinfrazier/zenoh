@@ -6092,6 +6092,7 @@ dependencies = [
  "zenoh-plugin-storage-manager",
  "zenoh-plugin-trait",
  "zenoh-util",
+ "zenoh_backend_traits",
 ]
 
 [[package]]
