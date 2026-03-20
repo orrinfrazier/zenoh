@@ -56,7 +56,7 @@ fn test_insert() {
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
             bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+            bloom_filter_fp_rate_permille: None,
         },
     );
 
@@ -123,7 +123,7 @@ fn test_digest() {
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
             bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+            bloom_filter_fp_rate_permille: None,
         },
     );
 
