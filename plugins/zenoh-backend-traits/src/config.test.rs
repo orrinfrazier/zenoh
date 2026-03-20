@@ -72,7 +72,79 @@ Actual message: {err}",
             sub_intervals: 4,
             hot: 6,
             warm: 60,
-            propagation_delay: Duration::from_millis(250)
+            propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
         })
+    );
+}
+
+// --- Piece 1: batch_size config tests ---
+
+#[test]
+fn piece1_batch_size_defaults_to_100() {
+    let config = ReplicaConfig::default();
+    assert_eq!(
+        config.batch_size, 100,
+        "ReplicaConfig::default().batch_size should be 100"
+    );
+}
+
+#[test]
+fn piece1_batch_size_parseable_from_json_config() {
+    let config_with_batch_size = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "batch_size": 50,
+        }
+    });
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config_with_batch_size).unwrap();
+    let replica = storage_config.replication.expect("replication config should be Some");
+    assert_eq!(
+        replica.batch_size, 50,
+        "batch_size should be parsed from JSON config"
+    );
+}
+
+#[test]
+fn piece1_batch_size_uses_default_when_omitted_in_json() {
+    let config_without_batch_size = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {}
+    });
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config_without_batch_size).unwrap();
+    let replica = storage_config.replication.expect("replication config should be Some");
+    assert_eq!(
+        replica.batch_size, 100,
+        "batch_size should default to 100 when not specified in JSON"
+    );
+}
+
+#[test]
+fn piece1_batch_size_zero_is_rejected() {
+    let config_with_zero_batch_size = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "batch_size": 0,
+        }
+    });
+    let result = StorageConfig::try_from(
+        "test-plugin",
+        "test-storage",
+        &config_with_zero_batch_size,
+    );
+    assert!(
+        result.is_err(),
+        "batch_size of 0 should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("must be greater than 0"),
+        "Error should mention the constraint: {}",
+        err
     );
 }

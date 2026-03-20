@@ -29,6 +29,7 @@ fn test_lower_bounds() {
             hot: 1,
             warm: 5,
             propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
         },
     );
 
@@ -50,6 +51,7 @@ fn test_difference() {
         hot: 1,
         warm: 5,
         propagation_delay: Duration::from_millis(250),
+        batch_size: 100,
     };
 
     let configuration_a = Configuration::new(
@@ -86,6 +88,7 @@ fn test_get_classification() {
             hot: 1,
             warm: 5,
             propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
         },
     );
 
@@ -146,5 +149,39 @@ fn test_get_classification() {
         configuration
             .get_time_classification(&timestamp_10_3)
             .unwrap()
+    );
+}
+
+// --- Piece 1: batch_size fingerprint exclusion test ---
+
+#[test]
+fn piece1_batch_size_not_included_in_configuration_fingerprint() {
+    let key_expr = OwnedKeyExpr::from_str("replication/test/**").unwrap();
+
+    let config_a = ReplicaConfig {
+        interval: Duration::from_secs(10),
+        sub_intervals: 5,
+        hot: 6,
+        warm: 30,
+        propagation_delay: Duration::from_millis(250),
+        batch_size: 100,
+    };
+
+    let config_b = ReplicaConfig {
+        interval: Duration::from_secs(10),
+        sub_intervals: 5,
+        hot: 6,
+        warm: 30,
+        propagation_delay: Duration::from_millis(250),
+        batch_size: 500,
+    };
+
+    let configuration_a = Configuration::new(key_expr.clone(), None, config_a);
+    let configuration_b = Configuration::new(key_expr, None, config_b);
+
+    assert_eq!(
+        configuration_a.fingerprint(),
+        configuration_b.fingerprint(),
+        "Changing batch_size should NOT change the Configuration fingerprint"
     );
 }
