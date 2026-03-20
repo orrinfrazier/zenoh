@@ -59,7 +59,7 @@ pub struct VolumeConfig {
     #[schemars(skip)]
     pub rest: JsonKeyValueMap,
 }
-#[derive(JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, PartialEq)]
 pub struct StorageConfig {
     pub name: String,
     pub key_expr: OwnedKeyExpr,
@@ -72,7 +72,7 @@ pub struct StorageConfig {
     pub replication: Option<ReplicaConfig>,
 }
 // Note: All parameters should be same for replicas, else will result on huge overhead
-#[derive(JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, PartialEq)]
 pub struct ReplicaConfig {
     pub interval: Duration,
     pub sub_intervals: usize,
@@ -82,6 +82,15 @@ pub struct ReplicaConfig {
     /// Number of events per batch in `AlignmentReply::RetrievalBatch` during alignment.
     /// This is a performance tuning parameter and does NOT need to match across replicas.
     pub batch_size: usize,
+    /// Capacity of the bloom filter used for fast key membership checks in the replication log.
+    /// If `None`, defaults to 4,194,304 (~5MB). For event-heavy workloads with unique-key
+    /// patterns, consider increasing this value.
+    /// This does NOT need to match across replicas.
+    pub bloom_filter_capacity: Option<usize>,
+    /// False positive rate of the bloom filter. Must be between 0.0 (exclusive) and 1.0
+    /// (exclusive). If `None`, defaults to 0.01 (1%).
+    /// This does NOT need to match across replicas.
+    pub bloom_filter_fp_rate: Option<f64>,
 }
 
 impl StructVersion for VolumeConfig {
@@ -158,6 +167,10 @@ impl Default for ReplicaConfig {
             //
             // Unlike other fields, this value does NOT need to match across replicas.
             batch_size: 100,
+            // Bloom filter settings default to None, meaning the hardcoded defaults in
+            // LogLatest::new will be used (capacity=4_194_304, fp_rate=0.01).
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate: None,
         }
     }
 }
@@ -636,6 +649,45 @@ impl StorageConfig {
                         bail!(
                             "Invalid type for field `batch_size` in `replica_config` of \
                              storage `{}`. Only integer values are accepted.",
+                            plugin_name
+                        )
+                    }
+                }
+                if let Some(p) = s.get("bloom_filter_capacity") {
+                    let p = p.to_string().parse::<usize>();
+                    if let Ok(p) = p {
+                        if p == 0 {
+                            bail!(
+                                "Invalid value for field `bloom_filter_capacity` in \
+                                 `replica_config` of storage `{}`. Value must be greater than 0.",
+                                plugin_name
+                            )
+                        }
+                        replication.bloom_filter_capacity = Some(p);
+                    } else {
+                        bail!(
+                            "Invalid type for field `bloom_filter_capacity` in `replica_config` \
+                             of storage `{}`. Only integer values are accepted.",
+                            plugin_name
+                        )
+                    }
+                }
+                if let Some(p) = s.get("bloom_filter_fp_rate") {
+                    let p = p.to_string().parse::<f64>();
+                    if let Ok(p) = p {
+                        if p <= 0.0 || p >= 1.0 {
+                            bail!(
+                                "Invalid value for field `bloom_filter_fp_rate` in \
+                                 `replica_config` of storage `{}`. Value must be between 0.0 \
+                                 (exclusive) and 1.0 (exclusive).",
+                                plugin_name
+                            )
+                        }
+                        replication.bloom_filter_fp_rate = Some(p);
+                    } else {
+                        bail!(
+                            "Invalid type for field `bloom_filter_fp_rate` in `replica_config` \
+                             of storage `{}`. Only floating point values are accepted.",
                             plugin_name
                         )
                     }
