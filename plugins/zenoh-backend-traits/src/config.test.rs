@@ -74,6 +74,8 @@ Actual message: {err}",
             warm: 60,
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate: None,
         })
     );
 }
@@ -147,4 +149,102 @@ fn piece1_batch_size_zero_is_rejected() {
         "Error should mention the constraint: {}",
         err
     );
+}
+
+// --- bloom filter config tests ---
+
+#[test]
+fn bloom_filter_fields_default_to_none() {
+    let config = ReplicaConfig::default();
+    assert_eq!(config.bloom_filter_capacity, None);
+    assert_eq!(config.bloom_filter_fp_rate, None);
+}
+
+#[test]
+fn bloom_filter_capacity_parseable_from_json() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_capacity": 1000000,
+        }
+    });
+    let storage = StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let replica = storage.replication.unwrap();
+    assert_eq!(replica.bloom_filter_capacity, Some(1_000_000));
+}
+
+#[test]
+fn bloom_filter_fp_rate_parseable_from_json() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate": 0.001,
+        }
+    });
+    let storage = StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let replica = storage.replication.unwrap();
+    assert_eq!(replica.bloom_filter_fp_rate, Some(0.001));
+}
+
+#[test]
+fn bloom_filter_capacity_zero_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_capacity": 0,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fp_rate_zero_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate": 0.0,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fp_rate_one_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate": 1.0,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fp_rate_above_one_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate": 1.5,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fields_absent_means_none() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {}
+    });
+    let storage = StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let replica = storage.replication.unwrap();
+    assert_eq!(replica.bloom_filter_capacity, None);
+    assert_eq!(replica.bloom_filter_fp_rate, None);
 }

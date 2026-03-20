@@ -35,7 +35,7 @@ use super::{
 ///
 /// Using the newtype pattern allows us to add methods to compute the time classification of
 /// events.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct Configuration {
     storage_key_expr: OwnedKeyExpr,
     prefix: Option<OwnedKeyExpr>,
