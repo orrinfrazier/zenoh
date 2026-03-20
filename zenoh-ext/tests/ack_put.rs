@@ -177,5 +177,17 @@ async fn ack_put_integration() {
         StorageInsertionResult::Replaced,
         "ack_put over existing value should return Replaced"
     );
+}
 
+/// Ensures the duplicated `StorageInsertionResult` in `zenoh-ext` stays in sync
+/// with the source-of-truth in `zenoh-backend-traits`.
+#[test]
+fn discriminant_parity() {
+    use zenoh_backend_traits::StorageInsertionResult as BackendResult;
+    use zenoh_ext::StorageInsertionResult as ExtResult;
+
+    assert_eq!(BackendResult::Outdated as u8, ExtResult::Outdated as u8);
+    assert_eq!(BackendResult::Inserted as u8, ExtResult::Inserted as u8);
+    assert_eq!(BackendResult::Replaced as u8, ExtResult::Replaced as u8);
+    assert_eq!(BackendResult::Deleted as u8, ExtResult::Deleted as u8);
 }
