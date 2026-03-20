@@ -54,8 +54,8 @@ fn test_difference() {
         warm: 5,
         propagation_delay: Duration::from_millis(250),
         batch_size: 100,
-            bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+        bloom_filter_capacity: None,
+        bloom_filter_fp_rate: None,
     };
 
     let configuration_a = Configuration::new(
@@ -171,8 +171,8 @@ fn piece1_batch_size_not_included_in_configuration_fingerprint() {
         warm: 30,
         propagation_delay: Duration::from_millis(250),
         batch_size: 100,
-            bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+        bloom_filter_capacity: None,
+        bloom_filter_fp_rate: None,
     };
 
     let config_b = ReplicaConfig {
