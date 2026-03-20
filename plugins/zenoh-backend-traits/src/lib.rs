@@ -181,11 +181,13 @@ pub enum History {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum StorageInsertionResult {
-    Outdated,
-    Inserted,
-    Replaced,
-    Deleted,
+    Outdated = 0,
+    Inserted = 1,
+    Replaced = 2,
+    Deleted = 3,
 }
 
 #[derive(Debug, Clone)]
