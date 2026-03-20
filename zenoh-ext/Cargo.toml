@@ -53,6 +53,7 @@ zenoh-util = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+zenoh_backend_traits = { workspace = true }
 zenoh-config = { workspace = true }
 zenoh-plugin-storage-manager = { path = "../plugins/zenoh-plugin-storage-manager" }
 zenoh-plugin-trait = { workspace = true }

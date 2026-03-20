@@ -566,9 +566,16 @@ impl StorageService {
 
         if is_ack_put || is_ack_delete {
             if is_ack_put && q.payload().is_none() {
-                let _ = q
+                if let Err(e) = q
                     .reply_err(ZBytes::from("_ack_put requires a payload"))
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        "Storage '{}' failed to send error reply for missing payload: {}",
+                        self.name,
+                        e
+                    );
+                }
                 return;
             }
 
@@ -576,7 +583,13 @@ impl StorageService {
                 Ok(k) => k,
                 Err(e) => {
                     tracing::error!("{}", e);
-                    let _ = q.reply_err(ZBytes::from(format!("{e}"))).await;
+                    if let Err(reply_err) = q.reply_err(ZBytes::from(format!("{e}"))).await {
+                        tracing::warn!(
+                            "Storage '{}' failed to send error reply for strip_prefix: {}",
+                            self.name,
+                            reply_err
+                        );
+                    }
                     return;
                 }
             };
@@ -629,7 +642,14 @@ impl StorageService {
                         op,
                         e
                     );
-                    let _ = q.reply_err(ZBytes::from(format!("{e}"))).await;
+                    if let Err(reply_err) = q.reply_err(ZBytes::from(format!("{e}"))).await {
+                        tracing::warn!(
+                            "Storage '{}' failed to send error reply for {}: {}",
+                            self.name,
+                            op,
+                            reply_err
+                        );
+                    }
                 }
             }
 
