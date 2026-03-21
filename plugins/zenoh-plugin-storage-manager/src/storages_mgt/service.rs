@@ -169,6 +169,9 @@ impl StorageService {
         );
 
         tokio::task::spawn(async move {
+            // Keep the Timer alive for the duration of the event loop so GC
+            // periodic events continue to fire.
+            let _gc_timer = t;
             loop {
                 tokio::select!(
                     // on sample for key_expr
