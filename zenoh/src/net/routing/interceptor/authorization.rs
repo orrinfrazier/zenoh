@@ -682,7 +682,6 @@ mod tests {
     use zenoh_keyexpr::keyexpr;
 
     /// Helper to create a PolicyEnforcer with namespace set.
-    /// This will NOT compile until the `namespace` field is added to `PolicyEnforcer` (Red Phase).
     fn enforcer_with_namespace(ns: &str, default_perm: Permission) -> PolicyEnforcer {
         let mut enforcer = PolicyEnforcer::new();
         enforcer.namespace = Some(
