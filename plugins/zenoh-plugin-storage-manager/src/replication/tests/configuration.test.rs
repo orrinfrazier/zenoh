@@ -31,7 +31,7 @@ fn test_lower_bounds() {
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
             bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+            bloom_filter_fp_rate_permille: None,
         },
     );
 
@@ -55,7 +55,7 @@ fn test_difference() {
         propagation_delay: Duration::from_millis(250),
         batch_size: 100,
         bloom_filter_capacity: None,
-        bloom_filter_fp_rate: None,
+        bloom_filter_fp_rate_permille: None,
     };
 
     let configuration_a = Configuration::new(
@@ -94,7 +94,7 @@ fn test_get_classification() {
             propagation_delay: Duration::from_millis(250),
             batch_size: 100,
             bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+            bloom_filter_fp_rate_permille: None,
         },
     );
 
@@ -172,7 +172,7 @@ fn piece1_batch_size_not_included_in_configuration_fingerprint() {
         propagation_delay: Duration::from_millis(250),
         batch_size: 100,
         bloom_filter_capacity: None,
-        bloom_filter_fp_rate: None,
+        bloom_filter_fp_rate_permille: None,
     };
 
     let config_b = ReplicaConfig {
@@ -183,7 +183,7 @@ fn piece1_batch_size_not_included_in_configuration_fingerprint() {
         propagation_delay: Duration::from_millis(250),
         batch_size: 500,
         bloom_filter_capacity: None,
-        bloom_filter_fp_rate: None,
+        bloom_filter_fp_rate_permille: None,
     };
 
     let configuration_a = Configuration::new(key_expr.clone(), None, config_a);
@@ -202,13 +202,13 @@ fn bloom_filter_fields_not_included_in_configuration_fingerprint() {
 
     let config_a = ReplicaConfig {
         bloom_filter_capacity: None,
-        bloom_filter_fp_rate: None,
+        bloom_filter_fp_rate_permille: None,
         ..ReplicaConfig::default()
     };
 
     let config_b = ReplicaConfig {
         bloom_filter_capacity: Some(1_000_000),
-        bloom_filter_fp_rate: Some(0.001),
+        bloom_filter_fp_rate_permille: Some(1),
         ..ReplicaConfig::default()
     };
 

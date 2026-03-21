@@ -59,7 +59,7 @@ pub struct VolumeConfig {
     #[schemars(skip)]
     pub rest: JsonKeyValueMap,
 }
-#[derive(JsonSchema, Debug, Clone, PartialEq)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
     pub name: String,
     pub key_expr: OwnedKeyExpr,
@@ -72,7 +72,7 @@ pub struct StorageConfig {
     pub replication: Option<ReplicaConfig>,
 }
 // Note: All parameters should be same for replicas, else will result on huge overhead
-#[derive(JsonSchema, Debug, Clone, PartialEq)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaConfig {
     pub interval: Duration,
     pub sub_intervals: usize,
@@ -87,10 +87,10 @@ pub struct ReplicaConfig {
     /// patterns, consider increasing this value.
     /// This does NOT need to match across replicas.
     pub bloom_filter_capacity: Option<usize>,
-    /// False positive rate of the bloom filter. Must be between 0.0 (exclusive) and 1.0
-    /// (exclusive). If `None`, defaults to 0.01 (1%).
+    /// False positive rate of the bloom filter, in per-mille (1 = 0.1%, 10 = 1%, 50 = 5%).
+    /// If `None`, defaults to 10 (1%). Must be between 1 and 999 inclusive.
     /// This does NOT need to match across replicas.
-    pub bloom_filter_fp_rate: Option<f64>,
+    pub bloom_filter_fp_rate_permille: Option<u16>,
 }
 
 impl StructVersion for VolumeConfig {
@@ -170,7 +170,7 @@ impl Default for ReplicaConfig {
             // Bloom filter settings default to None, meaning the hardcoded defaults in
             // LogLatest::new will be used (capacity=4_194_304, fp_rate=0.01).
             bloom_filter_capacity: None,
-            bloom_filter_fp_rate: None,
+            bloom_filter_fp_rate_permille: None,
         }
     }
 }
@@ -672,22 +672,22 @@ impl StorageConfig {
                         )
                     }
                 }
-                if let Some(p) = s.get("bloom_filter_fp_rate") {
-                    let p = p.to_string().parse::<f64>();
+                if let Some(p) = s.get("bloom_filter_fp_rate_permille") {
+                    let p = p.to_string().parse::<u16>();
                     if let Ok(p) = p {
-                        if p <= 0.0 || p >= 1.0 {
+                        if p == 0 || p >= 1000 {
                             bail!(
-                                "Invalid value for field `bloom_filter_fp_rate` in \
-                                 `replica_config` of storage `{}`. Value must be between 0.0 \
-                                 (exclusive) and 1.0 (exclusive).",
+                                "Invalid value for field `bloom_filter_fp_rate_permille` in \
+                                 `replica_config` of storage `{}`. Value must be between 1 and \
+                                 999 (per-mille, e.g. 10 = 1%).",
                                 plugin_name
                             )
                         }
-                        replication.bloom_filter_fp_rate = Some(p);
+                        replication.bloom_filter_fp_rate_permille = Some(p);
                     } else {
                         bail!(
-                            "Invalid type for field `bloom_filter_fp_rate` in `replica_config` \
-                             of storage `{}`. Only floating point values are accepted.",
+                            "Invalid type for field `bloom_filter_fp_rate_permille` in \
+                             `replica_config` of storage `{}`. Only integer values are accepted.",
                             plugin_name
                         )
                     }

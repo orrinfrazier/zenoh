@@ -342,7 +342,11 @@ impl LogLatest {
     ) -> Self {
         // Default: 2 << 22 = 4_194_304 items, ~5MB per storage with replication enabled.
         let bloom_capacity = replica_config.bloom_filter_capacity.unwrap_or(2 << 22);
-        let bloom_fp_rate = replica_config.bloom_filter_fp_rate.unwrap_or(0.01);
+        // Default: 10 permille = 1% false positive rate.
+        let bloom_fp_rate = replica_config
+            .bloom_filter_fp_rate_permille
+            .map(|p| f64::from(p) / 1000.0)
+            .unwrap_or(0.01);
 
         Self {
             configuration: Configuration::new(storage_key_expr, prefix, replica_config),
