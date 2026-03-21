@@ -369,6 +369,67 @@ impl<Handler> SessionGetBuilder<'_, '_, Handler> {
     }
 }
 
+/// A builder that resolves a get query and collects all replies into a collection.
+///
+/// Created via [`SessionGetBuilder::collect`].
+#[cfg(feature = "unstable")]
+pub struct SessionGetCollectBuilder<'a, 'b, B> {
+    inner: SessionGetBuilder<'a, 'b, DefaultHandler>,
+    _phantom: std::marker::PhantomData<B>,
+}
+
+#[cfg(feature = "unstable")]
+impl<B> Resolvable for SessionGetCollectBuilder<'_, '_, B>
+where
+    B: Default + Extend<Reply>,
+{
+    type To = ZResult<B>;
+}
+
+#[cfg(feature = "unstable")]
+impl<B> Wait for SessionGetCollectBuilder<'_, '_, B>
+where
+    B: Default + Extend<Reply>,
+{
+    fn wait(self) -> <Self as Resolvable>::To {
+        let receiver = self.inner.wait()?;
+        let mut collection = B::default();
+        while let Ok(reply) = receiver.recv() {
+            collection.extend(std::iter::once(reply));
+        }
+        Ok(collection)
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl<B> IntoFuture for SessionGetCollectBuilder<'_, '_, B>
+where
+    B: Default + Extend<Reply>,
+{
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Ready<<Self as Resolvable>::To>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.wait())
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl<'a, 'b> SessionGetBuilder<'a, 'b, DefaultHandler> {
+    /// Resolve the get query and collect all replies into a collection.
+    ///
+    /// Returns a builder that implements `IntoFuture` producing `ZResult<B>`.
+    pub fn collect<B>(self) -> SessionGetCollectBuilder<'a, 'b, B>
+    where
+        B: Default + Extend<Reply>,
+    {
+        SessionGetCollectBuilder {
+            inner: self,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<Handler> Resolvable for SessionGetBuilder<'_, '_, Handler>
 where
     Handler: IntoHandler<Reply> + Send,
