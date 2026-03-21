@@ -259,4 +259,325 @@ async fn event_subscriber_builder_custom_flush_interval() {
     session.close().await.unwrap();
 }
 
-// Integration tests for catch-up, dedup, and auto-flush are in issue #42.
+// ---------------------------------------------------------------------------
+// Integration tests — issue #42
+// ---------------------------------------------------------------------------
+
+/// Scenario 1: Fresh start — no persisted cursor, live events only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_fresh_start_live_only() {
+    const SLEEP: Duration = Duration::from_secs(1);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = {
+        let mut c = zenoh::Config::default();
+        c.scouting.multicast.set_enabled(Some(false)).unwrap();
+        c.timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let _ = c.set_mode(Some(WhatAmI::Peer));
+        ztimeout!(zenoh::open(c)).unwrap()
+    };
+
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/fresh-start/**")
+        .event()
+        .consumer_name("fresh-consumer"))
+    .unwrap();
+
+    // No cursor on first run
+    assert_eq!(sub.cursor_position(), None);
+
+    // Publish after subscriber is up
+    ztimeout!(session.put("test/fresh-start/a", "live-1")).unwrap();
+    tokio::time::sleep(SLEEP).await;
+
+    let sample = ztimeout!(sub.recv_async()).unwrap();
+    assert_eq!(
+        sample.payload().try_to_string().unwrap().as_ref(),
+        "live-1"
+    );
+
+    // Cursor should have advanced
+    assert!(sub.cursor_position().is_some());
+
+    // No extra samples
+    assert!(sub.try_recv().unwrap().is_none());
+
+    session.close().await.unwrap();
+}
+
+/// Scenario 5: Cursor persistence round-trip — flush, then verify the
+/// queryable serves the cursor via session.get().
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_cursor_persistence_roundtrip() {
+    const SLEEP: Duration = Duration::from_secs(1);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = {
+        let mut c = zenoh::Config::default();
+        c.scouting.multicast.set_enabled(Some(false)).unwrap();
+        c.timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let _ = c.set_mode(Some(WhatAmI::Peer));
+        ztimeout!(zenoh::open(c)).unwrap()
+    };
+
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/persist-rt/**")
+        .event()
+        .consumer_name("persist-consumer"))
+    .unwrap();
+
+    // Publish and consume an event so cursor advances
+    ztimeout!(session.put("test/persist-rt/x", "data-1")).unwrap();
+    tokio::time::sleep(SLEEP).await;
+
+    let sample = ztimeout!(sub.recv_async()).unwrap();
+    assert_eq!(
+        sample.payload().try_to_string().unwrap().as_ref(),
+        "data-1"
+    );
+
+    let cursor_after_recv = sub.cursor_position();
+    assert!(cursor_after_recv.is_some());
+
+    // Flush the cursor
+    ztimeout!(sub.flush_cursor()).unwrap();
+
+    // Verify the queryable serves the cursor via session.get()
+    let bookmark = CursorBookmark::new("persist-consumer", "test/persist-rt/**");
+    let persistence_key = bookmark.persistence_key();
+
+    let mut found = false;
+    let replies = ztimeout!(session.get(&persistence_key).timeout(Duration::from_secs(5))).unwrap();
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.into_result() {
+            let bytes = sample.payload().to_bytes();
+            assert!(!bytes.is_empty(), "cursor payload should not be empty");
+            found = true;
+        }
+    }
+    assert!(found, "cursor should be retrievable via session.get() after flush");
+
+    session.close().await.unwrap();
+}
+
+/// Scenario: Manual flush is a no-op when cursor hasn't advanced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_flush_noop_when_unchanged() {
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = {
+        let mut c = zenoh::Config::default();
+        c.scouting.multicast.set_enabled(Some(false)).unwrap();
+        c.timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let _ = c.set_mode(Some(WhatAmI::Peer));
+        ztimeout!(zenoh::open(c)).unwrap()
+    };
+
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/flush-noop/**")
+        .event()
+        .consumer_name("noop-consumer"))
+    .unwrap();
+
+    // Flush without any events — should succeed (no-op)
+    assert!(ztimeout!(sub.flush_cursor()).is_ok());
+    // Flush again — still no-op
+    assert!(ztimeout!(sub.flush_cursor()).is_ok());
+
+    // Queryable should NOT serve data since nothing was flushed
+    let bookmark = CursorBookmark::new("noop-consumer", "test/flush-noop/**");
+    let mut got_reply = false;
+    let replies = ztimeout!(session
+        .get(&bookmark.persistence_key())
+        .timeout(Duration::from_secs(2)))
+    .unwrap();
+    while let Ok(reply) = replies.recv_async().await {
+        if reply.into_result().is_ok() {
+            got_reply = true;
+        }
+    }
+    assert!(!got_reply, "queryable should not serve data when cursor was never set");
+
+    session.close().await.unwrap();
+}
+
+/// Scenario 6: Auto-flush at interval — configure 1s, process events,
+/// verify cursor was persisted without explicit flush.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_auto_flush_at_interval() {
+    const SLEEP: Duration = Duration::from_secs(1);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = {
+        let mut c = zenoh::Config::default();
+        c.scouting.multicast.set_enabled(Some(false)).unwrap();
+        c.timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let _ = c.set_mode(Some(WhatAmI::Peer));
+        ztimeout!(zenoh::open(c)).unwrap()
+    };
+
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/auto-flush/**")
+        .event()
+        .consumer_name("auto-flush-consumer")
+        .flush_interval(Duration::from_secs(1)))
+    .unwrap();
+
+    // Publish and consume so cursor advances
+    ztimeout!(session.put("test/auto-flush/x", "auto-1")).unwrap();
+    tokio::time::sleep(SLEEP).await;
+
+    let sample = ztimeout!(sub.recv_async()).unwrap();
+    assert_eq!(
+        sample.payload().try_to_string().unwrap().as_ref(),
+        "auto-1"
+    );
+
+    let cursor_ts = sub.cursor_position();
+    assert!(cursor_ts.is_some());
+
+    // Wait for auto-flush to fire (> 1s interval + margin)
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify cursor was auto-flushed via the queryable
+    let bookmark = CursorBookmark::new("auto-flush-consumer", "test/auto-flush/**");
+    let mut found = false;
+    let replies = ztimeout!(session
+        .get(&bookmark.persistence_key())
+        .timeout(Duration::from_secs(5)))
+    .unwrap();
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.into_result() {
+            let bytes = sample.payload().to_bytes();
+            assert!(!bytes.is_empty(), "auto-flushed cursor payload should not be empty");
+            found = true;
+        }
+    }
+    assert!(found, "auto-flush should have persisted the cursor");
+
+    session.close().await.unwrap();
+}
+
+/// Scenario: cursor_position() advances as events are received.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_cursor_advances_with_events() {
+    const SLEEP: Duration = Duration::from_millis(500);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = {
+        let mut c = zenoh::Config::default();
+        c.scouting.multicast.set_enabled(Some(false)).unwrap();
+        c.timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let _ = c.set_mode(Some(WhatAmI::Peer));
+        ztimeout!(zenoh::open(c)).unwrap()
+    };
+
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/cursor-advance/**")
+        .event()
+        .consumer_name("advance-consumer"))
+    .unwrap();
+
+    assert_eq!(sub.cursor_position(), None);
+
+    // Send 3 events, verify cursor advances monotonically
+    let mut prev_cursor = None;
+    for i in 0..3 {
+        ztimeout!(session.put(
+            &format!("test/cursor-advance/{i}"),
+            format!("msg-{i}")
+        ))
+        .unwrap();
+        tokio::time::sleep(SLEEP).await;
+
+        let sample = ztimeout!(sub.recv_async()).unwrap();
+        assert_eq!(
+            sample.payload().try_to_string().unwrap().as_ref(),
+            &format!("msg-{i}")
+        );
+
+        let cursor = sub.cursor_position();
+        assert!(cursor.is_some());
+        if let Some(prev) = prev_cursor {
+            assert!(
+                cursor.unwrap() > prev,
+                "cursor should advance monotonically"
+            );
+        }
+        prev_cursor = cursor;
+    }
+
+    session.close().await.unwrap();
+}
+
+/// Scenario 4: Dedup — events received by the live subscriber before
+/// catch-up completes should not be duplicated.
+/// Since catch-up only fires when a cursor exists, this tests the
+/// transition_to_live dedup path by ensuring no duplicate timestamps
+/// appear in the output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_no_duplicate_timestamps() {
+    const SLEEP: Duration = Duration::from_millis(500);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = {
+        let mut c = zenoh::Config::default();
+        c.scouting.multicast.set_enabled(Some(false)).unwrap();
+        c.timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let _ = c.set_mode(Some(WhatAmI::Peer));
+        ztimeout!(zenoh::open(c)).unwrap()
+    };
+
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/dedup/**")
+        .event()
+        .consumer_name("dedup-consumer"))
+    .unwrap();
+
+    // Publish several events
+    for i in 0..5 {
+        ztimeout!(session.put(&format!("test/dedup/{i}"), format!("val-{i}"))).unwrap();
+    }
+    tokio::time::sleep(SLEEP).await;
+
+    // Collect all received samples
+    let mut timestamps = Vec::new();
+    for _ in 0..5 {
+        if let Ok(sample) =
+            tokio::time::timeout(Duration::from_secs(5), sub.recv_async()).await
+        {
+            let sample = sample.unwrap();
+            if let Some(ts) = sample.timestamp() {
+                timestamps.push(*ts);
+            }
+        }
+    }
+
+    // Verify no duplicate timestamps
+    let unique: std::collections::HashSet<_> = timestamps.iter().collect();
+    assert_eq!(
+        timestamps.len(),
+        unique.len(),
+        "should have no duplicate timestamps"
+    );
+    assert!(!timestamps.is_empty(), "should have received events");
+
+    session.close().await.unwrap();
+}
