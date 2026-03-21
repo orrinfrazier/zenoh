@@ -20,7 +20,8 @@ use std::{
     time::Duration,
 };
 
-use zenoh_core::{Resolvable, Wait};
+use tracing::warn;
+use zenoh_core::{zlock, Resolvable, Wait};
 use zenoh_result::ZResult;
 
 use crate::{
@@ -67,6 +68,11 @@ impl CursorBookmark {
     /// Returns the persistence key.
     ///
     /// Format: `@cursors/{consumer_name}/{hex_hash_of_key_expr}`
+    ///
+    /// **Note:** The hash uses `DefaultHasher` which is deterministic within a
+    /// Rust version and platform but not guaranteed stable across Rust upgrades.
+    /// This is acceptable for the unstable API; a stable hash (e.g. FNV-1a) may
+    /// be substituted before stabilization.
     pub fn persistence_key(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.key_expr.hash(&mut hasher);
@@ -120,9 +126,25 @@ pub struct EventSubscriberBuilder<'a, 'b> {
 #[zenoh_macros::unstable]
 impl<'a, 'b> EventSubscriberBuilder<'a, 'b> {
     /// Set the consumer name.
+    ///
+    /// The name must not be empty or contain key expression special characters
+    /// (`/`, `*`, `?`, `$`, `#`).
     pub fn consumer_name(mut self, name: &str) -> Self {
         self.consumer_name = Some(name.to_string());
         self
+    }
+
+    fn validate_consumer_name(name: &str) -> ZResult<()> {
+        if name.is_empty() {
+            return Err(zenoh_result::zerror!("consumer_name must not be empty").into());
+        }
+        if name.contains(['/', '*', '?', '$', '#']) {
+            return Err(zenoh_result::zerror!(
+                "consumer_name must not contain key expression special characters (/, *, ?, $, #): '{name}'"
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Set the flush interval for automatic cursor persistence.
@@ -219,6 +241,7 @@ impl EventSubscriber {
         let consumer_name = conf
             .consumer_name
             .unwrap_or_else(|| "default".to_string());
+        EventSubscriberBuilder::validate_consumer_name(&consumer_name)?;
         let flush_interval = conf.flush_interval;
         let session = conf.session;
 
@@ -243,7 +266,7 @@ impl EventSubscriber {
                 if live_ready_clone.load(std::sync::atomic::Ordering::Acquire) {
                     let _ = sender_clone.send(sample);
                 } else {
-                    let mut buf = live_buffer_clone.lock().unwrap();
+                    let mut buf = zlock!(live_buffer_clone);
                     buf.push(sample);
                 }
             })
@@ -362,7 +385,7 @@ impl EventSubscriber {
         sender: &flume::Sender<Sample>,
         bookmark: &mut CursorBookmark,
     ) {
-        let mut buf = live_buffer.lock().unwrap();
+        let mut buf = zlock!(live_buffer);
         buf.sort_by(|a, b| a.timestamp().cmp(&b.timestamp()));
 
         for sample in buf.drain(..) {
@@ -389,7 +412,7 @@ impl EventSubscriber {
         session
             .declare_queryable(persistence_key)
             .callback(move |query| {
-                let lock = queryable_state.lock().unwrap();
+                let lock = zlock!(queryable_state);
                 if lock.last_flushed.is_some() {
                     if let Ok(json_bytes) = serde_json::to_vec(&lock.bookmark) {
                         let _ = query.reply(query.key_expr(), json_bytes).wait();
@@ -410,9 +433,8 @@ impl EventSubscriber {
             Ok(handle) => Some(handle.spawn(async move {
                 loop {
                     tokio::time::sleep(flush_interval).await;
-                    let result = Self::do_flush(&flush_state);
-                    if result.is_err() {
-                        break;
+                    if let Err(e) = Self::do_flush(&flush_state) {
+                        warn!("EventSubscriber auto-flush failed: {e}");
                     }
                 }
             })),
@@ -433,7 +455,7 @@ impl EventSubscriber {
         match self.receiver.try_recv() {
             Ok(sample) => {
                 if let Some(ts) = sample.timestamp() {
-                    let mut st = self.state.lock().unwrap();
+                    let mut st = zlock!(self.state);
                     st.bookmark.advance(*ts);
                 }
                 Ok(Some(sample))
@@ -445,7 +467,7 @@ impl EventSubscriber {
 
     /// Returns the current cursor position.
     pub fn cursor_position(&self) -> Option<Timestamp> {
-        let st = self.state.lock().unwrap();
+        let st = zlock!(self.state);
         st.bookmark.cursor_position()
     }
 
@@ -460,22 +482,28 @@ impl EventSubscriber {
     }
 
     fn do_flush(state: &Arc<Mutex<EventSubscriberState>>) -> ZResult<()> {
-        let mut lock = state.lock().unwrap();
-        let current = lock.bookmark.cursor_position();
+        // Extract data needed for put under the lock, then drop before I/O
+        let (json_bytes, persistence_key, current, session) = {
+            let lock = zlock!(state);
+            let current = lock.bookmark.cursor_position();
 
-        // No-op if cursor hasn't advanced since last flush, or has never been set
-        if current.is_none() || current == lock.last_flushed {
-            return Ok(());
-        }
+            // No-op if cursor hasn't advanced since last flush, or has never been set
+            if current.is_none() || current == lock.last_flushed {
+                return Ok(());
+            }
 
-        // Serialize the bookmark and persist via session.put
-        let json_bytes = serde_json::to_vec(&lock.bookmark)
-            .map_err(|e| zenoh_result::zerror!("failed to serialize cursor bookmark: {e}"))?;
+            let json_bytes = serde_json::to_vec(&lock.bookmark)
+                .map_err(|e| zenoh_result::zerror!("failed to serialize cursor bookmark: {e}"))?;
+            let persistence_key = lock.persistence_key.clone();
+            let session = lock.session.clone();
+            (json_bytes, persistence_key, current, session)
+            // lock dropped here
+        };
 
-        let persistence_key = lock.persistence_key.clone();
-        lock.session.put(&persistence_key, json_bytes).wait()?;
+        session.put(&persistence_key, json_bytes).wait()?;
 
-        // Mark as flushed — the queryable will now serve this data
+        // Re-acquire to update last_flushed
+        let mut lock = zlock!(state);
         lock.last_flushed = current;
 
         Ok(())
@@ -503,7 +531,7 @@ impl std::future::Future for EventRecvFut<'_> {
         match std::pin::Pin::new(&mut self.inner).poll(cx) {
             std::task::Poll::Ready(Ok(sample)) => {
                 if let Some(ts) = sample.timestamp() {
-                    let mut lock = state.lock().unwrap();
+                    let mut lock = zlock!(state);
                     lock.bookmark.advance(*ts);
                 }
                 std::task::Poll::Ready(Ok(sample))
