@@ -43,6 +43,8 @@ mod advanced_publisher;
 #[cfg(feature = "unstable")]
 mod advanced_subscriber;
 #[cfg(feature = "unstable")]
+mod event_subscriber;
+#[cfg(feature = "unstable")]
 pub mod group;
 #[cfg(feature = "unstable")]
 mod publication_cache;
@@ -75,6 +77,9 @@ pub use crate::{
     advanced_subscriber::{
         AdvancedSubscriber, AdvancedSubscriberBuilder, HistoryConfig, Miss, RecoveryConfig,
         SampleMissHandlerUndeclaration, SampleMissListener, SampleMissListenerBuilder,
+    },
+    event_subscriber::{
+        CursorBookmark, EventSubscriber, EventSubscriberBuilder,
     },
     publication_cache::{PublicationCache, PublicationCacheBuilder},
     publisher_ext::AdvancedPublisherBuilderExt,
