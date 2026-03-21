@@ -12,12 +12,14 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde_json::json;
+use zenoh::key_expr::OwnedKeyExpr;
 
 use super::StorageConfig;
-use crate::config::ReplicaConfig;
+use crate::config::{GarbageCollectionConfig, PrefixLifespan, ReplicaConfig};
 
 #[test]
 fn test_replica_config() {
@@ -74,5 +76,143 @@ Actual message: {err}",
             warm: 60,
             propagation_delay: Duration::from_millis(250)
         })
+    );
+}
+
+#[test]
+fn test_prefix_lifespan_config() {
+    let config = json!({
+        "key_expr": "devices/**",
+        "volume": "memory",
+        "garbage_collection": {
+            "period": 60,
+            "lifespan": 86400,
+            "prefix_lifespans": [
+                {
+                    "key_expr": "**/events/**",
+                    "lifespan": 172800,
+                    "delete_data": true
+                },
+                {
+                    "key_expr": "telemetry/**",
+                    "lifespan": 3600,
+                    "delete_data": false
+                }
+            ]
+        }
+    });
+
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let gc = &storage_config.garbage_collection_config;
+
+    assert_eq!(gc.period, Duration::from_secs(60));
+    assert_eq!(gc.lifespan, Duration::from_secs(86400));
+
+    let prefix_lifespans = gc.prefix_lifespans.as_ref().expect("prefix_lifespans should be Some");
+    assert_eq!(prefix_lifespans.len(), 2);
+
+    assert_eq!(
+        prefix_lifespans[0],
+        PrefixLifespan {
+            key_expr: OwnedKeyExpr::from_str("**/events/**").unwrap(),
+            lifespan: Duration::from_secs(172800),
+            delete_data: true,
+        }
+    );
+    assert_eq!(
+        prefix_lifespans[1],
+        PrefixLifespan {
+            key_expr: OwnedKeyExpr::from_str("telemetry/**").unwrap(),
+            lifespan: Duration::from_secs(3600),
+            delete_data: false,
+        }
+    );
+}
+
+#[test]
+fn test_prefix_lifespan_backward_compat() {
+    // Missing prefix_lifespans field should default to None
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "garbage_collection": {
+            "period": 30,
+            "lifespan": 86400
+        }
+    });
+
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    assert_eq!(
+        storage_config.garbage_collection_config,
+        GarbageCollectionConfig::default()
+    );
+    assert!(storage_config.garbage_collection_config.prefix_lifespans.is_none());
+}
+
+#[test]
+fn test_prefix_lifespan_no_gc_section() {
+    // No garbage_collection section at all should use defaults
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory"
+    });
+
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    assert_eq!(
+        storage_config.garbage_collection_config,
+        GarbageCollectionConfig::default()
+    );
+    assert!(storage_config.garbage_collection_config.prefix_lifespans.is_none());
+}
+
+#[test]
+fn test_prefix_lifespan_invalid_lifespan() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "garbage_collection": {
+            "prefix_lifespans": [
+                {
+                    "key_expr": "**/events/**",
+                    "lifespan": "not_a_number",
+                    "delete_data": true
+                }
+            ]
+        }
+    });
+
+    let result = StorageConfig::try_from("test-plugin", "test-storage", &config);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("lifespan"),
+        "Error should mention lifespan: {err}"
+    );
+}
+
+#[test]
+fn test_prefix_lifespan_missing_key_expr() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "garbage_collection": {
+            "prefix_lifespans": [
+                {
+                    "lifespan": 3600,
+                    "delete_data": true
+                }
+            ]
+        }
+    });
+
+    let result = StorageConfig::try_from("test-plugin", "test-storage", &config);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("key_expr"),
+        "Error should mention key_expr: {err}"
     );
 }
