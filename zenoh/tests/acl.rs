@@ -84,6 +84,14 @@ async fn test_acl_interface_names() {
     test_pub_sub_network_interface(27451).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_acl_namespace_auto_deny() {
+    zenoh::init_log_from_env_or("error");
+    test_namespace_auto_deny_blocks_outside(27460).await;
+    test_namespace_no_namespace_no_change(27460).await;
+    test_namespace_cross_namespace_blocked(27461).await;
+}
+
 async fn get_basic_router_config(port: u16) -> Config {
     let mut config = Config::default();
     config.set_mode(Some(WhatAmI::Router)).unwrap();
@@ -2065,4 +2073,185 @@ async fn test_pub_sub_network_interface(port: u16) {
     }
     close_sessions(sub_session, pub_session).await;
     close_router_session(session).await;
+}
+
+async fn test_namespace_auto_deny_blocks_outside(port: u16) {
+    println!("test_namespace_auto_deny_blocks_outside");
+    // Router with namespace "ns1" and ACL default allow
+    // Client puts to "other/data" (outside namespace) -> should be blocked
+    let mut config_router = get_basic_router_config(port).await;
+    config_router.namespace = Some(
+        zenoh_keyexpr::OwnedNonWildKeyExpr::try_from("ns1".to_string())
+            .expect("namespace should be valid"),
+    );
+    config_router
+        .insert_json5(
+            "access_control",
+            r#"{
+                "enabled": true,
+                "default_permission": "allow",
+                "rules": [],
+                "subjects": [],
+                "policies": []
+            }"#,
+        )
+        .unwrap();
+
+    println!("Opening router session");
+    let session = ztimeout!(zenoh::open(config_router)).unwrap();
+    let (sub_session, pub_session) = get_client_sessions(port).await;
+    {
+        // Put to a key OUTSIDE the namespace
+        let publisher = pub_session.declare_publisher("other/data").await.unwrap();
+        let received_value = Arc::new(Mutex::new(String::new()));
+
+        let temp_recv_value = received_value.clone();
+        let subscriber = sub_session
+            .declare_subscriber("other/data")
+            .callback(move |sample| {
+                if sample.kind() == SampleKind::Put {
+                    let mut temp_value = zlock!(temp_recv_value);
+                    *temp_value = sample.payload().try_to_string().unwrap().into_owned();
+                }
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(SLEEP).await;
+        publisher.put(VALUE).await.unwrap();
+        tokio::time::sleep(SLEEP).await;
+        // Should NOT be received -- blocked by namespace auto-deny
+        assert_ne!(*zlock!(received_value), VALUE);
+        ztimeout!(subscriber.undeclare()).unwrap();
+    }
+    close_sessions(sub_session, pub_session).await;
+    close_router_session(session).await;
+}
+
+async fn test_namespace_no_namespace_no_change(port: u16) {
+    println!("test_namespace_no_namespace_no_change");
+    // Router with NO namespace, ACL default allow
+    // Should behave exactly like normal ACL (allow everything)
+    let mut config_router = get_basic_router_config(port).await;
+    // No namespace set
+    config_router
+        .insert_json5(
+            "access_control",
+            r#"{
+                "enabled": true,
+                "default_permission": "allow",
+                "rules": [],
+                "subjects": [],
+                "policies": []
+            }"#,
+        )
+        .unwrap();
+
+    println!("Opening router session");
+    let session = ztimeout!(zenoh::open(config_router)).unwrap();
+    let (sub_session, pub_session) = get_client_sessions(port).await;
+    {
+        let publisher = pub_session.declare_publisher(KEY_EXPR).await.unwrap();
+        let received_value = Arc::new(Mutex::new(String::new()));
+
+        let temp_recv_value = received_value.clone();
+        let subscriber = sub_session
+            .declare_subscriber(KEY_EXPR)
+            .callback(move |sample| {
+                if sample.kind() == SampleKind::Put {
+                    let mut temp_value = zlock!(temp_recv_value);
+                    *temp_value = sample.payload().try_to_string().unwrap().into_owned();
+                }
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(SLEEP).await;
+        publisher.put(VALUE).await.unwrap();
+        tokio::time::sleep(SLEEP).await;
+        // SHOULD be received -- no namespace, no auto-deny
+        assert_eq!(*zlock!(received_value), VALUE);
+        ztimeout!(subscriber.undeclare()).unwrap();
+    }
+    close_sessions(sub_session, pub_session).await;
+    close_router_session(session).await;
+}
+
+async fn test_namespace_cross_namespace_blocked(port: u16) {
+    println!("test_namespace_cross_namespace_blocked");
+    // Two clients with different namespaces through a router with namespace "ns1"
+    // Client A (namespace "ns1") publishes to "data" → becomes "ns1/data" on the wire
+    // Client B (namespace "ns2") subscribes to "data" → expects "ns2/data" on the wire
+    // Router with namespace "ns1" blocks "ns2/**" traffic
+    let mut config_router = get_basic_router_config(port).await;
+    config_router.namespace = Some(
+        zenoh_keyexpr::OwnedNonWildKeyExpr::try_from("ns1".to_string())
+            .expect("namespace should be valid"),
+    );
+    config_router
+        .insert_json5(
+            "access_control",
+            r#"{
+                "enabled": true,
+                "default_permission": "allow",
+                "rules": [],
+                "subjects": [],
+                "policies": []
+            }"#,
+        )
+        .unwrap();
+
+    let router = ztimeout!(zenoh::open(config_router)).unwrap();
+
+    // Client A: namespace "ns1" (matches router)
+    let mut config_a = get_basic_client_config(port).await;
+    config_a.namespace = Some(
+        zenoh_keyexpr::OwnedNonWildKeyExpr::try_from("ns1".to_string())
+            .expect("namespace should be valid"),
+    );
+
+    // Client B: namespace "ns2" (different from router)
+    let mut config_b = get_basic_client_config(port).await;
+    config_b.namespace = Some(
+        zenoh_keyexpr::OwnedNonWildKeyExpr::try_from("ns2".to_string())
+            .expect("namespace should be valid"),
+    );
+
+    let session_a = ztimeout!(zenoh::open(config_a)).unwrap();
+    let session_b = ztimeout!(zenoh::open(config_b)).unwrap();
+
+    {
+        // Client B subscribes to "data" (which becomes "ns2/data" on the wire)
+        let received_value = Arc::new(Mutex::new(String::new()));
+        let temp_recv_value = received_value.clone();
+        let subscriber = session_b
+            .declare_subscriber("data")
+            .callback(move |sample| {
+                if sample.kind() == SampleKind::Put {
+                    let mut temp_value = zlock!(temp_recv_value);
+                    *temp_value = sample.payload().try_to_string().unwrap().into_owned();
+                }
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(SLEEP).await;
+
+        // Client A publishes to "data" (which becomes "ns1/data" on the wire)
+        let publisher = session_a.declare_publisher("data").await.unwrap();
+        publisher.put(VALUE).await.unwrap();
+        tokio::time::sleep(SLEEP).await;
+
+        // Client B should NOT receive — cross-namespace traffic is blocked
+        assert_ne!(
+            *zlock!(received_value),
+            VALUE,
+            "cross-namespace message should be blocked"
+        );
+        ztimeout!(subscriber.undeclare()).unwrap();
+    }
+
+    ztimeout!(session_a.close()).unwrap();
+    ztimeout!(session_b.close()).unwrap();
+    close_router_session(router).await;
 }

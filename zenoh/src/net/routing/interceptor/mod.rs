@@ -139,7 +139,10 @@ pub(crate) fn interceptor_factories(config: &Config) -> ZResult<Vec<InterceptorF
         }
     }
     res.extend(downsampling_interceptor_factories(config.downsampling())?);
-    res.extend(acl_interceptor_factories(config.access_control())?);
+    res.extend(acl_interceptor_factories(
+        config.access_control(),
+        config.namespace.clone(),
+    )?);
     res.extend(qos_overwrite_interceptor_factories(config.qos().network())?);
     res.extend(low_pass_interceptor_factories(config.low_pass_filter())?);
     Ok(res)
