@@ -703,36 +703,35 @@ impl Timed for GarbageCollectionEvent {
         }
 
         if let Some(latest_updates) = &self.latest_updates {
-            // Per-prefix lifespan GC: delete data for keys matching configured prefixes
             if let Some(prefix_lifespans) = &self.config.prefix_lifespans {
+                // Pre-compute time limits per prefix (Finding 3: avoid per-key SystemTime::now)
+                let now = NTP64::from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap(),
+                );
+                let prefix_limits: Vec<_> = prefix_lifespans
+                    .iter()
+                    .map(|pl| (pl, now - NTP64::from(pl.lifespan)))
+                    .collect();
+
                 let mut latest = latest_updates.write().await;
                 let mut keys_to_remove = Vec::new();
+                // Collect storage deletes to batch after releasing cache lock (Finding 2)
+                let mut storage_deletes: Vec<(OwnedKeyExpr, Timestamp)> = Vec::new();
 
                 for (log_key, event) in latest.iter() {
+                    let mut matched = false;
                     if let Some(stripped_key) = event.key_expr() {
-                        for pl in prefix_lifespans {
+                        for (pl, prefix_time_limit) in &prefix_limits {
                             if pl.key_expr.intersects(stripped_key) {
-                                let prefix_time_limit =
-                                    NTP64::from(
-                                        SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .unwrap(),
-                                    ) - NTP64::from(pl.lifespan);
-                                if event.timestamp().get_time() < &prefix_time_limit {
+                                matched = true;
+                                if event.timestamp().get_time() < prefix_time_limit {
                                     if pl.delete_data {
-                                        let mut storage = self.storage.lock().await;
-                                        if let Err(e) = storage
-                                            .delete(
-                                                Some(stripped_key.clone()),
-                                                *event.timestamp(),
-                                            )
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                "Prefix GC: failed to delete key '{}': {e}",
-                                                stripped_key
-                                            );
-                                        }
+                                        storage_deletes.push((
+                                            stripped_key.clone(),
+                                            *event.timestamp(),
+                                        ));
                                     }
                                     keys_to_remove.push(log_key.clone());
                                 }
@@ -740,10 +739,29 @@ impl Timed for GarbageCollectionEvent {
                             }
                         }
                     }
+                    // Finding 1: non-matching keys (and None-keyed) still get default
+                    // tombstone cleanup
+                    if !matched && event.timestamp().get_time() < &time_limit {
+                        keys_to_remove.push(log_key.clone());
+                    }
                 }
 
                 for key in &keys_to_remove {
                     latest.remove(key);
+                }
+                drop(latest);
+
+                // Batch-delete from storage without holding cache write lock
+                if !storage_deletes.is_empty() {
+                    let mut storage = self.storage.lock().await;
+                    for (key, ts) in &storage_deletes {
+                        if let Err(e) = storage.delete(Some(key.clone()), *ts).await {
+                            tracing::warn!(
+                                "Prefix GC: failed to delete key '{}': {e}",
+                                key
+                            );
+                        }
+                    }
                 }
             } else {
                 // Default behavior: clean up old metadata based on global lifespan
@@ -918,20 +936,17 @@ mod tests {
 
         gc_event.run().await;
 
-        // Verify: state key still exists in storage
+        // Verify: state key still exists in storage (NOT deleted by prefix GC)
         let mut s = storage.lock().await;
         let result = s.get(Some(state_key), "").await;
         assert!(
             result.is_ok(),
-            "Entity state key should NOT have been deleted"
+            "Entity state key should NOT have been deleted from storage"
         );
 
-        // Verify: cache still contains the event
-        assert_eq!(
-            latest_updates.read().await.len(),
-            1,
-            "Entity state event should still be in cache"
-        );
+        // Note: the cache entry IS cleaned by default tombstone GC (the entry is older
+        // than the default lifespan). This is correct — only STORAGE data is preserved
+        // for non-matching keys. Metadata cleanup still applies.
     }
 
     #[tokio::test]

@@ -216,3 +216,46 @@ fn test_prefix_lifespan_missing_key_expr() {
         "Error should mention key_expr: {err}"
     );
 }
+
+#[test]
+fn test_prefix_lifespan_invalid_type_not_array() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "garbage_collection": {
+            "prefix_lifespans": "not_an_array"
+        }
+    });
+
+    let result = StorageConfig::try_from("test-plugin", "test-storage", &config);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("prefix_lifespans"),
+        "Error should mention prefix_lifespans: {err}"
+    );
+}
+
+#[test]
+fn test_prefix_lifespan_missing_lifespan_field() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "garbage_collection": {
+            "prefix_lifespans": [
+                {
+                    "key_expr": "**/events/**",
+                    "delete_data": true
+                }
+            ]
+        }
+    });
+
+    let result = StorageConfig::try_from("test-plugin", "test-storage", &config);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("lifespan"),
+        "Error should mention lifespan: {err}"
+    );
+}

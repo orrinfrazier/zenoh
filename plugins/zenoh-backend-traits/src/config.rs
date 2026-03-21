@@ -570,7 +570,8 @@ impl StorageConfig {
                         )
                     }
                 }
-                if let Some(Value::Array(entries)) = s.get("prefix_lifespans") {
+                match s.get("prefix_lifespans") {
+                    Some(Value::Array(entries)) => {
                     let mut prefix_lifespans = Vec::with_capacity(entries.len());
                     for entry in entries {
                         let ke_str = entry
@@ -622,6 +623,13 @@ impl StorageConfig {
                         });
                     }
                     garbage_collection_config.prefix_lifespans = Some(prefix_lifespans);
+                    }
+                    Some(_) => bail!(
+                        "`prefix_lifespans` field in `garbage_collection` of storage `{}` \
+                         must be an array",
+                        plugin_name
+                    ),
+                    None => {}
                 }
                 garbage_collection_config
             }
