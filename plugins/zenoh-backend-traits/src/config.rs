@@ -572,57 +572,59 @@ impl StorageConfig {
                 }
                 match s.get("prefix_lifespans") {
                     Some(Value::Array(entries)) => {
-                    let mut prefix_lifespans = Vec::with_capacity(entries.len());
-                    for entry in entries {
-                        let ke_str = entry
-                            .get("key_expr")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
-                                zerror!(
-                                    "Each entry in `prefix_lifespans` of `garbage_collection` of \
-                                     storage `{}` must have a string `key_expr` field",
-                                    plugin_name
-                                )
-                            })?;
-                        let ke = match keyexpr::new(ke_str) {
-                            Ok(ke) => ke.to_owned(),
-                            Err(e) => bail!(
-                                "key_expr='{}' in `prefix_lifespans` is not a valid \
-                                 key-expression: {}",
-                                ke_str,
-                                e
-                            ),
-                        };
-                        let lifespan_secs = entry
-                            .get("lifespan")
-                            .ok_or_else(|| {
-                                zerror!(
-                                    "Each entry in `prefix_lifespans` of `garbage_collection` of \
-                                     storage `{}` must have a `lifespan` field",
-                                    plugin_name
-                                )
-                            })?
-                            .to_string()
-                            .parse::<u64>()
-                            .map_err(|_| {
-                                zerror!(
-                                    "Invalid type for field `lifespan` in `prefix_lifespans` of \
-                                     `garbage_collection` of storage `{}`. Only integer values \
-                                     are accepted.",
-                                    plugin_name
-                                )
-                            })?;
-                        let delete_data = entry
-                            .get("delete_data")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        prefix_lifespans.push(PrefixLifespan {
-                            key_expr: ke,
-                            lifespan: Duration::from_secs(lifespan_secs),
-                            delete_data,
-                        });
-                    }
-                    garbage_collection_config.prefix_lifespans = Some(prefix_lifespans);
+                        let mut prefix_lifespans = Vec::with_capacity(entries.len());
+                        for entry in entries {
+                            let ke_str = entry
+                                .get("key_expr")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    zerror!(
+                                        "Each entry in `prefix_lifespans` of \
+                                         `garbage_collection` of storage `{}` must have a \
+                                         string `key_expr` field",
+                                        plugin_name
+                                    )
+                                })?;
+                            let ke = match keyexpr::new(ke_str) {
+                                Ok(ke) => ke.to_owned(),
+                                Err(e) => bail!(
+                                    "key_expr='{}' in `prefix_lifespans` is not a valid \
+                                     key-expression: {}",
+                                    ke_str,
+                                    e
+                                ),
+                            };
+                            let lifespan_secs = entry
+                                .get("lifespan")
+                                .ok_or_else(|| {
+                                    zerror!(
+                                        "Each entry in `prefix_lifespans` of \
+                                         `garbage_collection` of storage `{}` must have a \
+                                         `lifespan` field",
+                                        plugin_name
+                                    )
+                                })?
+                                .to_string()
+                                .parse::<u64>()
+                                .map_err(|_| {
+                                    zerror!(
+                                        "Invalid type for field `lifespan` in \
+                                         `prefix_lifespans` of `garbage_collection` of \
+                                         storage `{}`. Only integer values are accepted.",
+                                        plugin_name
+                                    )
+                                })?;
+                            let delete_data = entry
+                                .get("delete_data")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            prefix_lifespans.push(PrefixLifespan {
+                                key_expr: ke,
+                                lifespan: Duration::from_secs(lifespan_secs),
+                                delete_data,
+                            });
+                        }
+                        garbage_collection_config.prefix_lifespans = Some(prefix_lifespans);
                     }
                     Some(_) => bail!(
                         "`prefix_lifespans` field in `garbage_collection` of storage `{}` \
