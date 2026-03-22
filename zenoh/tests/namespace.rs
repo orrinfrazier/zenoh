@@ -681,7 +681,7 @@ async fn zenoh_namespace_queryable_get_routed_clients() -> ZResult<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Per-namespace connection limits (Issue #44)
+// Connection limits (max_connections config) — Issue #124
 // ---------------------------------------------------------------------------
 
 /// Helper: create a router config with max_connections set.
@@ -740,6 +740,28 @@ async fn test_max_connections_rejects_excess() -> ZResult<()> {
     // Clean up.
     ztimeout!(_client1.close()).unwrap();
     ztimeout!(_client2.close()).unwrap();
+    ztimeout!(_router.close()).unwrap();
+    Ok(())
+}
+
+/// When max_connections is 1, only a single client can connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_max_connections_one_rejects_second() -> ZResult<()> {
+    zenoh_util::init_log_from_env_or("error");
+
+    let router_config = get_router_config_with_max_connections(19204, 1).await;
+    let _router = ztimeout!(zenoh::open(router_config)).unwrap();
+
+    let _client1 = ztimeout!(zenoh::open(get_client_config(19204).await)).unwrap();
+
+    // Second client must be rejected because max_connections=1.
+    let result = ztimeout!(zenoh::open(get_client_config(19204).await));
+    assert!(
+        result.is_err(),
+        "Expected 2nd connection to be rejected when max_connections=1"
+    );
+
+    ztimeout!(_client1.close()).unwrap();
     ztimeout!(_router.close()).unwrap();
     Ok(())
 }

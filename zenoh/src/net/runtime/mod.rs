@@ -568,6 +568,12 @@ impl RuntimeBuilder {
         // the config because TransportManager::builder().from_config() reads max_sessions
         // from config — there is no direct setter on the builder.
         if let Some(max) = *config.max_connections() {
+            if max == 0 {
+                tracing::warn!(
+                    "max_connections=0 will reject ALL incoming connections; \
+                     set to None (omit) for unlimited or a positive value to limit"
+                );
+            }
             tracing::info!("max_connections={max}, mapping to transport/unicast/max_sessions");
             config
                 .insert_json5("transport/unicast/max_sessions", &max.to_string())
