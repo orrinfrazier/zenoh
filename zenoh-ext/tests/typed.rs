@@ -164,3 +164,42 @@ async fn typed_pub_sub_multiple_messages() {
         assert_eq!(received.label, format!("sensor-{i}"));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_subscriber_blocking_recv() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    let subscriber = session
+        .declare_typed_subscriber::<TelemetryPayload, _>("test/typed/blocking")
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/blocking")
+        .await
+        .unwrap();
+
+    let payload = TelemetryPayload {
+        device_id: 99,
+        temperature: 36.6,
+        label: "blocking-test".to_string(),
+    };
+
+    publisher.put(&payload).await.unwrap();
+
+    // Use blocking recv from a spawn_blocking context
+    let received = tokio::task::spawn_blocking(move || {
+        subscriber
+            .recv()
+            .expect("channel closed")
+            .expect("deserialization failed")
+    })
+    .await
+    .expect("task panicked");
+
+    assert_eq!(received, payload);
+}
