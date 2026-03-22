@@ -17,6 +17,17 @@
 //! This module is intended for Zenoh's internal use.
 //!
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
+//!
+//! # Namespace-aware ACL authorization
+//!
+//! Decision priority (highest to lowest):
+//! 1. **Explicit deny** — per-subject deny rule matches the key expression
+//! 2. **Explicit allow** — per-subject allow rule matches the key expression
+//! 3. **Namespace deny** — key expression is outside the configured namespace prefix
+//! 4. **Default permission** — the configured default (Allow or Deny)
+//!
+//! When no namespace is configured, step 3 is skipped — the default permission applies directly.
+//! When no ACL rules are configured (empty policy map), only steps 3-4 apply.
 use std::collections::{HashMap, HashSet};
 
 use ahash::RandomState;
@@ -622,6 +633,16 @@ impl PolicyEnforcer {
     }
 
     /// Check each msg against the ACL ruleset for allow/deny.
+    ///
+    /// ## Performance
+    ///
+    /// Called on every message. The namespace check (`namespace.is_none()` at the
+    /// fast-path branch and `is_under_namespace()` in `namespace_aware_default()`)
+    /// adds at most one `Option::is_none()` check and one `keyexpr::starts_with()`
+    /// comparison to the hot path. Both are O(1) operations on stack-local data —
+    /// no allocation, no lock, no syscall. When no namespace is configured, the
+    /// `is_none()` fast-path returns immediately without entering
+    /// `namespace_aware_default()`.
     pub fn policy_decision_point(
         &self,
         subject: usize,
