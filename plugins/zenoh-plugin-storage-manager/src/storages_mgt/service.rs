@@ -674,7 +674,7 @@ struct GarbageCollectionEvent {
 impl Timed for GarbageCollectionEvent {
     async fn run(&mut self) {
         tracing::trace!("Start garbage collection");
-        let time_limit = NTP64::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap())
+        let time_limit = NTP64::from(SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before UNIX epoch"))
             - NTP64::from(self.config.lifespan);
 
         // Get lock on fields
