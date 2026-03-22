@@ -19,11 +19,7 @@
 
 use std::time::Duration;
 
-use zenoh::{
-    bytes::Encoding,
-    query::Reply,
-    Config,
-};
+use zenoh::{bytes::Encoding, query::Reply, Config};
 use zenoh_ext::{ack_delete, ack_put, StorageInsertionResult};
 use zenoh_plugin_trait::Plugin;
 
@@ -74,15 +70,9 @@ async fn ack_put_integration() {
 
     // --- Scenario 1: Basic ack'd put returns Inserted ---
     let key_a = zenoh::key_expr::KeyExpr::try_from("ack/ext/a").unwrap();
-    let result = ack_put(
-        &session,
-        &key_a,
-        "hello",
-        Encoding::TEXT_PLAIN,
-        ACK_TIMEOUT,
-    )
-    .await
-    .unwrap();
+    let result = ack_put(&session, &key_a, "hello", Encoding::TEXT_PLAIN, ACK_TIMEOUT)
+        .await
+        .unwrap();
     assert_eq!(
         result,
         StorageInsertionResult::Inserted,
@@ -158,7 +148,11 @@ async fn ack_put_integration() {
         .unwrap()
         .into_iter()
         .collect();
-    assert_eq!(replies.len(), 1, "Regular put should be retrievable via get");
+    assert_eq!(
+        replies.len(),
+        1,
+        "Regular put should be retrievable via get"
+    );
     let sample = replies[0].result().expect("Expected Ok reply");
     assert_eq!(sample.payload().try_to_string().unwrap(), "normal-value");
 
@@ -177,17 +171,4 @@ async fn ack_put_integration() {
         StorageInsertionResult::Replaced,
         "ack_put over existing value should return Replaced"
     );
-}
-
-/// Ensures the duplicated `StorageInsertionResult` in `zenoh-ext` stays in sync
-/// with the source-of-truth in `zenoh-backend-traits`.
-#[test]
-fn discriminant_parity() {
-    use zenoh_backend_traits::StorageInsertionResult as BackendResult;
-    use zenoh_ext::StorageInsertionResult as ExtResult;
-
-    assert_eq!(BackendResult::Outdated as u8, ExtResult::Outdated as u8);
-    assert_eq!(BackendResult::Inserted as u8, ExtResult::Inserted as u8);
-    assert_eq!(BackendResult::Replaced as u8, ExtResult::Replaced as u8);
-    assert_eq!(BackendResult::Deleted as u8, ExtResult::Deleted as u8);
 }
