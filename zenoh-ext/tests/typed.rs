@@ -18,6 +18,28 @@ use zenoh_ext::{
     Deserialize, Serialize, TypedSchema, ZDeserializeError, ZDeserializer, ZSerializer,
 };
 
+// -- Validation test types (invalid schema names) --
+
+struct EmptySchemaName;
+
+impl Serialize for EmptySchemaName {
+    fn serialize(&self, _serializer: &mut ZSerializer) {}
+}
+
+impl TypedSchema for EmptySchemaName {
+    const SCHEMA_NAME: &'static str = "";
+}
+
+struct WhitespaceSchemaName;
+
+impl Serialize for WhitespaceSchemaName {
+    fn serialize(&self, _serializer: &mut ZSerializer) {}
+}
+
+impl TypedSchema for WhitespaceSchemaName {
+    const SCHEMA_NAME: &'static str = "   ";
+}
+
 // -- Test payload types --
 
 #[derive(Debug, Clone, PartialEq)]
@@ -552,4 +574,30 @@ async fn typed_publisher_to_untyped_subscriber_backward_compat() {
 
     // Attachment is present (contains the version)
     assert!(sample.attachment().is_some());
+}
+
+// -- Schema name validation tests --
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "must not be empty")]
+async fn typed_publisher_rejects_empty_schema_name() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let _publisher = session
+        .declare_typed_publisher::<EmptySchemaName, _>("test/typed/validate/empty")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "must not be empty")]
+async fn typed_publisher_rejects_whitespace_only_schema_name() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let _publisher = session
+        .declare_typed_publisher::<WhitespaceSchemaName, _>("test/typed/validate/whitespace")
+        .await
+        .unwrap();
 }
