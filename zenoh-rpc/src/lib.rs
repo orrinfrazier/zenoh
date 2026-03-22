@@ -31,3 +31,11 @@
 //!
 //! - `default`: Core RPC functionality
 //! - `unstable`: Gated experimental APIs
+
+mod deadline;
+mod discovery;
+mod error;
+
+pub use deadline::{deadline_attachment, DeadlineContext, DEADLINE_ATTACHMENT_KEY};
+pub use discovery::{fnv1a_hash, service_liveliness_prefix, service_liveliness_token_key};
+pub use error::{ServiceError, StatusCode};
