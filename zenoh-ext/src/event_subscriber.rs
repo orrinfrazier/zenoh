@@ -13,20 +13,19 @@
 //
 
 use std::{
-    collections::hash_map::DefaultHasher,
-    future::{IntoFuture, Ready},
-    hash::{Hash, Hasher},
+    future::IntoFuture,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use tracing::warn;
 use zenoh::{
+    bytes::ZBytes,
     handlers::DefaultHandler,
     internal::{zerror, zlock},
     key_expr::KeyExpr,
     pubsub::{Subscriber, SubscriberBuilder},
-    query::{Queryable, Selector},
+    query::{Parameters, Queryable, Selector, TimeBound, TimeExpr, TimeRange, ZenohParameters},
     sample::Sample,
     session::WeakSession,
     time::Timestamp,
@@ -34,6 +33,20 @@ use zenoh::{
 };
 
 use crate::serialization::{Deserialize, Serialize, ZDeserializeError, ZDeserializer, ZSerializer};
+use crate::{z_deserialize, z_serialize};
+
+// ---------------------------------------------------------------------------
+// FNV-1a hash (stable across Rust versions, unlike DefaultHasher)
+// ---------------------------------------------------------------------------
+
+fn fnv1a_hash(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
 
 // ---------------------------------------------------------------------------
 // CursorBookmark
@@ -43,7 +56,7 @@ use crate::serialization::{Deserialize, Serialize, ZDeserializeError, ZDeseriali
 ///
 /// Tracks the consumer name, key expression, and last processed HLC timestamp.
 #[zenoh_macros::unstable]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CursorBookmark {
     consumer_name: String,
     key_expr: String,
@@ -65,14 +78,9 @@ impl CursorBookmark {
     ///
     /// Format: `@cursors/{consumer_name}/{hex_hash_of_key_expr}`
     ///
-    /// **Note:** The hash uses `DefaultHasher` which is deterministic within a
-    /// Rust version and platform but not guaranteed stable across Rust upgrades.
-    /// This is acceptable for the unstable API; a stable hash (e.g. FNV-1a) may
-    /// be substituted before stabilization.
+    /// Uses FNV-1a for a stable hash that does not change across Rust versions.
     pub fn persistence_key(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        self.key_expr.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = fnv1a_hash(self.key_expr.as_bytes());
         format!("@cursors/{}/{:x}", self.consumer_name, hash)
     }
 
@@ -228,7 +236,7 @@ impl Wait for EventSubscriberBuilder<'_, '_> {
 #[cfg(feature = "unstable")]
 impl IntoFuture for EventSubscriberBuilder<'_, '_> {
     type Output = <Self as Resolvable>::To;
-    type IntoFuture = Ready<<Self as Resolvable>::To>;
+    type IntoFuture = std::future::Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
         std::future::ready(self.wait())
@@ -357,9 +365,8 @@ impl EventSubscriber {
         {
             for reply in replies {
                 if let Ok(sample) = reply.into_result() {
-                    if let Ok(persisted) = serde_json::from_slice::<CursorBookmark>(
-                        &sample.payload().to_bytes(),
-                    ) {
+                    let zbytes = sample.payload().clone();
+                    if let Ok(persisted) = z_deserialize::<CursorBookmark>(&zbytes) {
                         if let Some(ts) = persisted.cursor_position() {
                             bookmark.advance(ts);
                         }
@@ -381,22 +388,24 @@ impl EventSubscriber {
     ) -> Option<Timestamp> {
         let mut last_catchup_ts: Option<Timestamp> = None;
 
-        if cursor_position.is_some() {
+        if let Some(cursor_ts) = cursor_position {
+            let mut params = Parameters::empty();
+            params.set_time_range(TimeRange {
+                start: TimeBound::Exclusive(TimeExpr::Fixed(
+                    cursor_ts.get_time().to_system_time(),
+                )),
+                end: TimeBound::Unbounded,
+            });
+
             if let Ok(replies) = session
-                .get(Selector::from(key_expr))
+                .get(Selector::from((key_expr, params)))
                 .timeout(Duration::from_secs(10))
                 .wait()
             {
                 let mut catchup_samples: Vec<Sample> = Vec::new();
                 for reply in replies {
                     if let Ok(sample) = reply.into_result() {
-                        if let Some(ts) = sample.timestamp() {
-                            if cursor_position.map(|c| *ts > c).unwrap_or(true) {
-                                catchup_samples.push(sample);
-                            }
-                        } else {
-                            catchup_samples.push(sample);
-                        }
+                        catchup_samples.push(sample);
                     }
                 }
 
@@ -454,9 +463,8 @@ impl EventSubscriber {
             .callback(move |query| {
                 let lock = zlock!(queryable_state);
                 if lock.last_flushed.is_some() {
-                    if let Ok(json_bytes) = serde_json::to_vec(&lock.bookmark) {
-                        let _ = query.reply(query.key_expr(), json_bytes).wait();
-                    }
+                    let zbytes: ZBytes = z_serialize(&lock.bookmark);
+                    let _ = query.reply(query.key_expr(), zbytes).wait();
                 }
             })
             .wait()
@@ -473,7 +481,7 @@ impl EventSubscriber {
             Ok(handle) => Some(handle.spawn(async move {
                 loop {
                     tokio::time::sleep(flush_interval).await;
-                    if let Err(e) = Self::do_flush(&flush_state) {
+                    if let Err(e) = Self::do_flush_async(&flush_state).await {
                         warn!("EventSubscriber auto-flush failed: {e}");
                     }
                 }
@@ -518,12 +526,12 @@ impl EventSubscriber {
 
     /// Manually flush the cursor to persistent storage.
     pub async fn flush_cursor(&self) -> ZResult<()> {
-        Self::do_flush(&self.state)
+        Self::do_flush_async(&self.state).await
     }
 
-    fn do_flush(state: &Arc<Mutex<EventSubscriberState>>) -> ZResult<()> {
-        // Extract data needed for put under the lock, then drop before I/O
-        let (json_bytes, persistence_key, current, session) = {
+    async fn do_flush_async(state: &Arc<Mutex<EventSubscriberState>>) -> ZResult<()> {
+        // Extract data needed for put under the lock, then drop before await
+        let (zbytes, persistence_key, current, session) = {
             let lock = zlock!(state);
             let current = lock.bookmark.cursor_position();
 
@@ -532,15 +540,14 @@ impl EventSubscriber {
                 return Ok(());
             }
 
-            let json_bytes = serde_json::to_vec(&lock.bookmark)
-                .map_err(|e| zerror!("failed to serialize cursor bookmark: {e}"))?;
+            let zbytes: ZBytes = z_serialize(&lock.bookmark);
             let persistence_key = lock.persistence_key.clone();
             let session = lock.session.clone();
-            (json_bytes, persistence_key, current, session)
+            (zbytes, persistence_key, current, session)
             // lock dropped here
         };
 
-        session.put(&persistence_key, json_bytes).wait()?;
+        session.put(&persistence_key, zbytes).await?;
 
         // Re-acquire to update last_flushed
         let mut lock = zlock!(state);

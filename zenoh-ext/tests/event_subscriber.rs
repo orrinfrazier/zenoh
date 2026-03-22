@@ -89,6 +89,18 @@ fn cursor_bookmark_persistence_key_differs_for_different_consumers() {
 }
 
 #[test]
+fn cursor_bookmark_persistence_key_stable_hash() {
+    // Regression test: FNV-1a hash must produce this exact value for "demo/sensor/temp"
+    // to ensure persistence keys are stable across builds.
+    let bookmark = CursorBookmark::new("my-consumer", "demo/sensor/temp");
+    let key = bookmark.persistence_key();
+    assert_eq!(
+        key, "@cursors/my-consumer/ba6ef8819c3cc3ac",
+        "persistence_key hash must be stable (FNV-1a)"
+    );
+}
+
+#[test]
 fn cursor_bookmark_advance_sets_timestamp() {
     let hlc = uhlc::HLC::default();
     let ts1 = hlc.new_timestamp();
