@@ -137,6 +137,7 @@ impl MockStorage {
         })
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.store.lock().unwrap().len()
     }
