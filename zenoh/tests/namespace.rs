@@ -698,7 +698,6 @@ async fn get_router_config_with_max_connections(
         .unwrap();
     config.scouting.multicast.set_enabled(Some(false)).unwrap();
     // Set the per-namespace connection limit.
-    // This field does not exist yet — Red Phase: expected compile/runtime error.
     config
         .insert_json5("max_connections", &max_connections.to_string())
         .unwrap();
