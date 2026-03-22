@@ -563,9 +563,12 @@ impl RuntimeBuilder {
             shm_clients,
         } = self;
 
-        // If max_connections is set, override transport/unicast/max_sessions
+        // max_connections is enforced via the transport layer's max_sessions mechanism,
+        // which rejects connections during the protocol handshake (before OPEN ACK).
+        // This ensures the remote peer's zenoh::open() returns Err rather than
+        // succeeding and then being closed asynchronously.
         if let Some(max) = *config.max_connections() {
-            tracing::info!("max_connections={max} configured, overriding transport/unicast/max_sessions");
+            tracing::info!("max_connections={max} configured, setting transport/unicast/max_sessions");
             config
                 .insert_json5("transport/unicast/max_sessions", &max.to_string())
                 .map_err(|e| zerror!("Failed to set max_sessions from max_connections: {}", e))?;
