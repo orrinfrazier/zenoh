@@ -290,54 +290,6 @@ pub(crate) fn init(session: WeakSession) {
     if let Err(e) = session.declare_transport_links_listener_inner(callback, false, None, None) {
         tracing::error!("Unable to subscribe to link events: {}", e);
     }
-
-    // Register connection status queryable for routers at @/{whatami}/{zid}
-    // so that queries like @/router/** can discover connection info.
-    if session.runtime().whatami() == WhatAmI::Router {
-        let whatami_str = session.runtime().whatami().to_str();
-        let conn_prefix: OwnedKeyExpr =
-            format!("@/{whatami_str}").try_into().unwrap();
-        let conn_key = KeyExpr::from(&conn_prefix / &own_zid);
-        let _conn_qabl = session.declare_queryable_inner(
-            &conn_key,
-            true,
-            Locality::SessionLocal,
-            Callback::from({
-                let session = session.clone();
-                let conn_prefix = conn_prefix.clone();
-                move |q: Query| {
-                    on_connection_status_query(&session, &conn_prefix, q);
-                }
-            }),
-            None,
-        );
-    }
-}
-
-fn on_connection_status_query(session: &WeakSession, prefix: &keyexpr, query: Query) {
-    use serde_json::json;
-
-    if let Some(runtime) = session.runtime().static_runtime() {
-        let active_connections = runtime.active_connections_count();
-
-        let mut json = json!({
-            "active_connections": active_connections,
-        });
-        if let Some(max) = runtime.max_connections() {
-            json["max_connections"] = json!(max);
-        }
-
-        let reply_key = prefix / &session.zid().into_keyexpr();
-        match serde_json::to_vec(&json) {
-            Ok(bytes) => {
-                let _ = query
-                    .reply(reply_key, bytes)
-                    .encoding(Encoding::APPLICATION_JSON)
-                    .wait();
-            }
-            Err(e) => tracing::error!("Error serializing connection status: {}", e),
-        }
-    }
 }
 
 fn reply<T: serde::Serialize>(
@@ -383,5 +335,17 @@ pub(crate) fn on_admin_query(
             let link_json = LinkJson::from(link);
             reply(match_prefix, reply_prefix, &ke_link, &query, &link_json);
         }
+    }
+
+    // Connection status summary
+    if let Some(runtime) = session.runtime().static_runtime() {
+        let mut conn_json = serde_json::json!({
+            "active_connections": runtime.active_connections_count(),
+        });
+        if let Some(max) = runtime.max_connections() {
+            conn_json["max_connections"] = serde_json::json!(max);
+        }
+        let ke_connections = unsafe { keyexpr::from_str_unchecked("connections") };
+        reply(match_prefix, reply_prefix, ke_connections, &query, &conn_json);
     }
 }
