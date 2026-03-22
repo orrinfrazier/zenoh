@@ -12,10 +12,12 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
+mod client;
 mod deadline;
 mod error;
 mod server;
 
+pub use client::ServiceClient;
 pub use deadline::{deadline_attachment, DeadlineContext, DEADLINE_ATTACHMENT_KEY};
 pub use error::{ServiceError, StatusCode};
 pub use server::{MethodHandler, ServiceServer, ServiceServerBuilder, METHOD_ATTACHMENT_KEY};

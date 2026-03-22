@@ -32,7 +32,7 @@ use crate::{z_deserialize, z_serialize};
 pub const METHOD_ATTACHMENT_KEY: &str = "rpc:method";
 
 /// Status code attachment key for replies.
-const STATUS_ATTACHMENT_KEY: &str = "rpc:status";
+pub(super) const STATUS_ATTACHMENT_KEY: &str = "rpc:status";
 
 /// Trait for handling a specific RPC method.
 ///
