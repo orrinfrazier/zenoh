@@ -559,10 +559,6 @@ pub mod pubsub {
         publisher::{Publisher, PublisherUndeclaration},
         subscriber::{Subscriber, SubscriberUndeclaration},
     };
-    #[cfg(feature = "unstable")]
-    pub use crate::api::builders::event_subscriber::{
-        CursorBookmark, EventRecvFut, EventSubscriber, EventSubscriberBuilder,
-    };
 }
 
 /// # Query/reply primitives

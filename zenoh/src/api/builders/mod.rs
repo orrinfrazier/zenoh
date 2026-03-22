@@ -13,8 +13,6 @@
 //
 
 pub(crate) mod close;
-#[cfg(feature = "unstable")]
-pub(crate) mod event_subscriber;
 pub(crate) mod info;
 pub(crate) mod info_links;
 pub(crate) mod info_transport;

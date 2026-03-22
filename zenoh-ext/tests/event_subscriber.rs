@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use zenoh::internal::ztimeout;
 use zenoh_config::{ModeDependentValue, WhatAmI};
-use zenoh_ext::{z_deserialize, z_serialize, CursorBookmark, EventSubscriber};
+use zenoh_ext::{z_deserialize, z_serialize, CursorBookmark, EventSubscriber, EventSubscriberBuilderExt};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 

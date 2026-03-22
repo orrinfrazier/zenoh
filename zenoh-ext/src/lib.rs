@@ -79,7 +79,7 @@ pub use crate::{
         SampleMissHandlerUndeclaration, SampleMissListener, SampleMissListenerBuilder,
     },
     event_subscriber::{
-        CursorBookmark, EventSubscriber, EventSubscriberBuilder,
+        CursorBookmark, EventSubscriber, EventSubscriberBuilder, EventSubscriberBuilderExt,
     },
     publication_cache::{PublicationCache, PublicationCacheBuilder},
     publisher_ext::AdvancedPublisherBuilderExt,
