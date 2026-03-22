@@ -449,3 +449,48 @@ async fn typed_sub_no_version_attachment_degrades_gracefully() {
     assert!(received.is_ok());
     assert_eq!(received.unwrap(), payload);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_publisher_to_untyped_subscriber_backward_compat() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    // Untyped subscriber receives raw samples
+    let subscriber = session
+        .declare_subscriber("test/typed/backward/typed2untyped")
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Typed publisher with schema version
+    let publisher = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/backward/typed2untyped")
+        .schema_version(3)
+        .await
+        .unwrap();
+
+    let payload = TelemetryPayload {
+        device_id: 77,
+        temperature: 18.5,
+        label: "backward-compat".to_string(),
+    };
+    publisher.put(&payload).await.unwrap();
+
+    let sample = tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    // Untyped subscriber gets valid ZBytes — version attachment is ignorable metadata
+    assert!(!sample.payload().is_empty());
+
+    // Can manually deserialize
+    let deserialized: TelemetryPayload =
+        zenoh_ext::z_deserialize(sample.payload()).expect("manual deserialization should work");
+    assert_eq!(deserialized, payload);
+
+    // Attachment is present (contains the version)
+    assert!(sample.attachment().is_some());
+}
