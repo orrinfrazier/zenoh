@@ -67,9 +67,8 @@ async-global-executor = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uhlc = { workspace = true }
 
-[[bench]]
+[[example]]
 name = "replication_catchup"
-harness = false
 
 [package.metadata.deb]
 copyright = "2024 ZettaScale Technology"
