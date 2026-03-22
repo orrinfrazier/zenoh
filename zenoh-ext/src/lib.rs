@@ -50,6 +50,8 @@ mod publication_cache;
 mod publisher_ext;
 #[cfg(feature = "unstable")]
 mod querying_subscriber;
+#[cfg(feature = "unstable")]
+mod rpc;
 mod serialization;
 mod typed;
 #[cfg(feature = "unstable")]
@@ -83,6 +85,7 @@ pub use crate::{
     },
     publication_cache::{PublicationCache, PublicationCacheBuilder},
     publisher_ext::AdvancedPublisherBuilderExt,
+    rpc::{ServiceError, StatusCode},
     querying_subscriber::{
         ExtractSample, FetchingSubscriber, FetchingSubscriberBuilder, KeySpace, LivelinessSpace,
         QueryingSubscriberBuilder, UserSpace,
