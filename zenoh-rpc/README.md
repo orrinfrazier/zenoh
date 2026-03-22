@@ -44,6 +44,31 @@ trait DeviceConfigService {
 }
 ```
 
+## Examples
+
+Runnable examples are in the [`examples/`](examples/) directory:
+
+| Example | Description |
+|---------|-------------|
+| [`rpc_server`](examples/rpc_server.rs) | Multi-method server with "greet" and "add" handlers, input validation, and error responses |
+| [`rpc_client`](examples/rpc_client.rs) | Typed and raw method calls, plus error handling for invalid input and missing methods |
+| [`rpc_discovery`](examples/rpc_discovery.rs) | Liveliness-based service discovery with `is_available()` and `instance_count()` |
+| [`rpc_deadline`](examples/rpc_deadline.rs) | Deadline propagation from client to server, budget inspection, and expiration handling |
+
+Run the server and client in separate terminals:
+
+```bash
+cargo run --example rpc_server -p zenoh-rpc
+cargo run --example rpc_client -p zenoh-rpc
+```
+
+Or run self-contained examples directly:
+
+```bash
+cargo run --example rpc_discovery -p zenoh-rpc
+cargo run --example rpc_deadline -p zenoh-rpc
+```
+
 ## Feature flags
 
 | Flag | Description |
