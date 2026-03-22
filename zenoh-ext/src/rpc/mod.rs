@@ -12,6 +12,8 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
+mod deadline;
 mod error;
 
+pub use deadline::{deadline_attachment, DeadlineContext, DEADLINE_ATTACHMENT_KEY};
 pub use error::{ServiceError, StatusCode};
