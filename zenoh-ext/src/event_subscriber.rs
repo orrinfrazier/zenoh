@@ -171,6 +171,7 @@ impl<'a, 'b> EventSubscriberBuilderExt<'a, 'b> for SubscriberBuilder<'a, 'b, Def
             key_expr: self.key_expr,
             consumer_name: None,
             flush_interval: Duration::from_secs(5),
+            buffer_size: 256,
         }
     }
 }
@@ -182,12 +183,16 @@ impl<'a, 'b> EventSubscriberBuilderExt<'a, 'b> for SubscriberBuilder<'a, 'b, Def
 /// Builder for an [`EventSubscriber`].
 ///
 /// Created via the `.event()` method on a `SubscriberBuilder`.
+///
+/// **Note:** Resolving this builder (via `.await` or `.wait()`) may block for up
+/// to 15 seconds: 5s to load a persisted cursor and 10s for the catch-up query.
 #[zenoh_macros::unstable]
 pub struct EventSubscriberBuilder<'a, 'b> {
     pub(crate) session: &'a Session,
     pub(crate) key_expr: ZResult<KeyExpr<'b>>,
     pub(crate) consumer_name: Option<String>,
     pub(crate) flush_interval: Duration,
+    pub(crate) buffer_size: usize,
 }
 
 #[zenoh_macros::unstable]
@@ -217,6 +222,12 @@ impl<'a, 'b> EventSubscriberBuilder<'a, 'b> {
     /// Set the flush interval for automatic cursor persistence.
     pub fn flush_interval(mut self, interval: Duration) -> Self {
         self.flush_interval = interval;
+        self
+    }
+
+    /// Set the internal channel buffer size (default: 256).
+    pub fn buffer_size(mut self, size: usize) -> Self {
+        self.buffer_size = size;
         self
     }
 }
@@ -276,9 +287,13 @@ pub struct EventSubscriber {
 #[zenoh_macros::unstable]
 impl Drop for EventSubscriber {
     fn drop(&mut self) {
+        // Abort the background flush task
         if let Some(handle) = self._flush_task.take() {
             handle.abort();
         }
+
+        // Best-effort synchronous flush so cursor progress isn't lost on clean shutdown
+        Self::do_flush_sync(&self.state);
     }
 }
 
@@ -300,7 +315,7 @@ impl EventSubscriber {
 
         let cursor_position = bookmark.cursor_position();
 
-        let (sender, receiver) = flume::bounded::<Sample>(256);
+        let (sender, receiver) = flume::bounded::<Sample>(conf.buffer_size);
 
         let live_buffer: Arc<Mutex<Vec<Sample>>> = Arc::new(Mutex::new(Vec::new()));
         let live_buffer_clone = live_buffer.clone();
@@ -547,13 +562,44 @@ impl EventSubscriber {
             // lock dropped here
         };
 
-        session.put(&persistence_key, zbytes).await?;
+        // Session may be closed during shutdown — treat as success
+        match session.put(&persistence_key, zbytes).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::debug!("EventSubscriber flush skipped (session closed?): {e}");
+                return Ok(());
+            }
+        }
 
         // Re-acquire to update last_flushed
         let mut lock = zlock!(state);
         lock.last_flushed = current;
 
         Ok(())
+    }
+
+    /// Synchronous best-effort flush for use in Drop. Never panics.
+    fn do_flush_sync(state: &Arc<Mutex<EventSubscriberState>>) {
+        let (zbytes, persistence_key, current, session) = {
+            let lock = zlock!(state);
+            let current = lock.bookmark.cursor_position();
+
+            if current.is_none() || current == lock.last_flushed {
+                return;
+            }
+
+            let zbytes: ZBytes = z_serialize(&lock.bookmark);
+            let persistence_key = lock.persistence_key.clone();
+            let session = lock.session.clone();
+            (zbytes, persistence_key, current, session)
+        };
+
+        // Best-effort: ignore errors (session may already be closed)
+        let _ = session.put(&persistence_key, zbytes).wait();
+
+        if let Ok(mut lock) = state.lock() {
+            lock.last_flushed = current;
+        }
     }
 }
 
