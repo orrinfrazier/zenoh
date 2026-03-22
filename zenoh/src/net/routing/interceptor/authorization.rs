@@ -299,11 +299,15 @@ impl PolicyEnforcer {
 
     /// Check if a key expression is under the configured namespace.
     /// Returns true if no namespace is set, or if the key matches/is under the namespace prefix.
-    /// Uses the same `strip_nonwild_prefix` API as `ENamespace` for consistency.
+    /// `strip_nonwild_prefix` returns `None` when the key exactly equals the prefix (no
+    /// remaining suffix), so we also check for exact equality.
     fn is_under_namespace(&self, key_expr: &keyexpr) -> bool {
         match &self.namespace {
             None => true,
-            Some(ns) => key_expr.strip_nonwild_prefix(ns).is_some(),
+            Some(ns) => {
+                key_expr.as_str() == ns.as_str()
+                    || key_expr.strip_nonwild_prefix(ns).is_some()
+            }
         }
     }
 
@@ -638,11 +642,12 @@ impl PolicyEnforcer {
     ///
     /// Called on every message. The namespace check (`namespace.is_none()` at the
     /// fast-path branch and `is_under_namespace()` in `namespace_aware_default()`)
-    /// adds at most one `Option::is_none()` check and one `keyexpr::starts_with()`
-    /// comparison to the hot path. Both are O(1) operations on stack-local data —
-    /// no allocation, no lock, no syscall. When no namespace is configured, the
-    /// `is_none()` fast-path returns immediately without entering
-    /// `namespace_aware_default()`.
+    /// adds at most one `Option::is_none()` check and one
+    /// `keyexpr::strip_nonwild_prefix()` call to the hot path. The prefix check
+    /// is O(k) where k is the namespace prefix length — negligible for typical
+    /// namespace strings. No allocation, no lock, no syscall. When no namespace
+    /// is configured, the `is_none()` fast-path returns immediately without
+    /// entering `namespace_aware_default()`.
     pub fn policy_decision_point(
         &self,
         subject: usize,
