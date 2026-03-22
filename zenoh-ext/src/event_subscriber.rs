@@ -174,6 +174,8 @@ impl<'a, 'b> EventSubscriberBuilderExt<'a, 'b> for SubscriberBuilder<'a, 'b, Def
             flush_interval: Duration::from_secs(5),
             buffer_size: 256,
             cursor_persister: None,
+            cursor_load_timeout: Duration::from_secs(5),
+            catch_up_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -187,7 +189,7 @@ impl<'a, 'b> EventSubscriberBuilderExt<'a, 'b> for SubscriberBuilder<'a, 'b, Def
 /// Created via the `.event()` method on a `SubscriberBuilder`.
 ///
 /// **Note:** Resolving this builder (via `.await` or `.wait()`) may block for up
-/// to 15 seconds: 5s to load a persisted cursor and 10s for the catch-up query.
+/// to `cursor_load_timeout + catch_up_timeout` (default 15s: 5s + 10s).
 #[zenoh_macros::unstable]
 pub struct EventSubscriberBuilder<'a, 'b> {
     pub(crate) session: &'a Session,
@@ -196,6 +198,8 @@ pub struct EventSubscriberBuilder<'a, 'b> {
     pub(crate) flush_interval: Duration,
     pub(crate) buffer_size: usize,
     pub(crate) cursor_persister: Option<Arc<dyn CursorPersister>>,
+    pub(crate) cursor_load_timeout: Duration,
+    pub(crate) catch_up_timeout: Duration,
 }
 
 #[zenoh_macros::unstable]
@@ -231,6 +235,18 @@ impl<'a, 'b> EventSubscriberBuilder<'a, 'b> {
     /// Set the internal channel buffer size (default: 256).
     pub fn buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = size;
+        self
+    }
+
+    /// Set the timeout for loading a persisted cursor on startup (default: 5s).
+    pub fn cursor_load_timeout(mut self, timeout: Duration) -> Self {
+        self.cursor_load_timeout = timeout;
+        self
+    }
+
+    /// Set the timeout for the catch-up query on startup (default: 10s).
+    pub fn catch_up_timeout(mut self, timeout: Duration) -> Self {
+        self.catch_up_timeout = timeout;
         self
     }
 
@@ -325,7 +341,15 @@ impl EventSubscriber {
         let mut bookmark = CursorBookmark::new(&consumer_name, key_expr.as_str());
         let persistence_key = bookmark.persistence_key();
 
-        Self::load_persisted_cursor(session, &persistence_key, &mut bookmark);
+        let cursor_load_timeout = conf.cursor_load_timeout;
+        let catch_up_timeout = conf.catch_up_timeout;
+
+        Self::load_persisted_cursor(
+            session,
+            &persistence_key,
+            &mut bookmark,
+            cursor_load_timeout,
+        );
 
         let cursor_position = bookmark.cursor_position();
 
@@ -349,8 +373,14 @@ impl EventSubscriber {
             })
             .wait()?;
 
-        let last_catchup_ts =
-            Self::do_catchup(session, &key_expr, cursor_position, &sender, &mut bookmark);
+        let last_catchup_ts = Self::do_catchup(
+            session,
+            &key_expr,
+            cursor_position,
+            &sender,
+            &mut bookmark,
+            catch_up_timeout,
+        );
 
         Self::transition_to_live(&live_buffer, last_catchup_ts, &sender, &mut bookmark);
         live_ready.store(true, std::sync::atomic::Ordering::Release);
@@ -379,21 +409,26 @@ impl EventSubscriber {
         session: &Session,
         persistence_key: &str,
         bookmark: &mut CursorBookmark,
+        timeout: Duration,
     ) {
-        if let Ok(replies) = session
-            .get(persistence_key)
-            .timeout(Duration::from_secs(5))
-            .wait()
-        {
-            for reply in replies {
-                if let Ok(sample) = reply.into_result() {
-                    let zbytes = sample.payload().clone();
-                    if let Ok(persisted) = z_deserialize::<CursorBookmark>(&zbytes) {
-                        if let Some(ts) = persisted.cursor_position() {
-                            bookmark.advance(ts);
+        match session.get(persistence_key).timeout(timeout).wait() {
+            Ok(replies) => {
+                for reply in replies {
+                    if let Ok(sample) = reply.into_result() {
+                        let zbytes = sample.payload().clone();
+                        if let Ok(persisted) = z_deserialize::<CursorBookmark>(&zbytes) {
+                            if let Some(ts) = persisted.cursor_position() {
+                                bookmark.advance(ts);
+                            }
                         }
                     }
                 }
+            }
+            Err(e) => {
+                warn!(
+                    "EventSubscriber cursor load timed out after {timeout:?} \
+                     for key '{persistence_key}': {e}. Starting without persisted cursor."
+                );
             }
         }
     }
@@ -407,6 +442,7 @@ impl EventSubscriber {
         cursor_position: Option<Timestamp>,
         sender: &flume::Sender<Sample>,
         bookmark: &mut CursorBookmark,
+        timeout: Duration,
     ) -> Option<Timestamp> {
         let mut last_catchup_ts: Option<Timestamp> = None;
 
@@ -417,28 +453,36 @@ impl EventSubscriber {
                 end: TimeBound::Unbounded,
             });
 
-            if let Ok(replies) = session
+            match session
                 .get(Selector::from((key_expr, params)))
-                .timeout(Duration::from_secs(10))
+                .timeout(timeout)
                 .wait()
             {
-                let mut catchup_samples: Vec<Sample> = Vec::new();
-                for reply in replies {
-                    if let Ok(sample) = reply.into_result() {
-                        catchup_samples.push(sample);
+                Ok(replies) => {
+                    let mut catchup_samples: Vec<Sample> = Vec::new();
+                    for reply in replies {
+                        if let Ok(sample) = reply.into_result() {
+                            catchup_samples.push(sample);
+                        }
+                    }
+
+                    catchup_samples.sort_by(|a, b| a.timestamp().cmp(&b.timestamp()));
+
+                    for sample in &catchup_samples {
+                        if let Some(ts) = sample.timestamp() {
+                            bookmark.advance(*ts);
+                            last_catchup_ts = Some(*ts);
+                        }
+                    }
+                    for sample in catchup_samples {
+                        let _ = sender.send(sample);
                     }
                 }
-
-                catchup_samples.sort_by(|a, b| a.timestamp().cmp(&b.timestamp()));
-
-                for sample in &catchup_samples {
-                    if let Some(ts) = sample.timestamp() {
-                        bookmark.advance(*ts);
-                        last_catchup_ts = Some(*ts);
-                    }
-                }
-                for sample in catchup_samples {
-                    let _ = sender.send(sample);
+                Err(e) => {
+                    warn!(
+                        "EventSubscriber catch-up query timed out after {timeout:?} \
+                         for '{key_expr}': {e}. Some events may be missed."
+                    );
                 }
             }
         }
