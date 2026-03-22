@@ -28,34 +28,7 @@ use zenoh::{
     query::{Reply, Selector},
     Result as ZResult, Session,
 };
-
-/// Result of an acknowledged storage insertion operation.
-///
-/// Mirrors the `StorageInsertionResult` from `zenoh-backend-traits` but lives
-/// in `zenoh-ext` to avoid a plugin dependency.  The wire encoding is a single
-/// `u8` discriminant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum StorageInsertionResult {
-    Outdated = 0,
-    Inserted = 1,
-    Replaced = 2,
-    Deleted = 3,
-}
-
-impl TryFrom<u8> for StorageInsertionResult {
-    type Error = zenoh::Error;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Outdated),
-            1 => Ok(Self::Inserted),
-            2 => Ok(Self::Replaced),
-            3 => Ok(Self::Deleted),
-            v => Err(format!("invalid StorageInsertionResult discriminant: {v}").into()),
-        }
-    }
-}
+pub use zenoh_backend_traits::StorageInsertionResult;
 
 /// Query parameter indicating an acknowledged put.
 const ACK_PUT_PARAM: &str = "_ack_put=true";
@@ -106,12 +79,9 @@ pub async fn ack_put(
         .timeout(timeout)
         .await?;
 
-    let reply: Reply = replies
-        .recv_async()
-        .await
-        .map_err(|_| -> zenoh::Error {
-            "no ack reply received (timeout or channel closed)".into()
-        })?;
+    let reply: Reply = replies.recv_async().await.map_err(|_| -> zenoh::Error {
+        "no ack reply received (timeout or channel closed)".into()
+    })?;
 
     parse_ack_reply(reply)
 }
@@ -133,60 +103,9 @@ pub async fn ack_delete(
     let selector = Selector::owned(key_expr.clone(), ACK_DELETE_PARAM);
     let replies = session.get(selector).timeout(timeout).await?;
 
-    let reply: Reply = replies
-        .recv_async()
-        .await
-        .map_err(|_| -> zenoh::Error {
-            "no ack reply received (timeout or channel closed)".into()
-        })?;
+    let reply: Reply = replies.recv_async().await.map_err(|_| -> zenoh::Error {
+        "no ack reply received (timeout or channel closed)".into()
+    })?;
 
     parse_ack_reply(reply)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn try_from_u8_valid_variants() {
-        assert_eq!(
-            StorageInsertionResult::try_from(0).unwrap(),
-            StorageInsertionResult::Outdated
-        );
-        assert_eq!(
-            StorageInsertionResult::try_from(1).unwrap(),
-            StorageInsertionResult::Inserted
-        );
-        assert_eq!(
-            StorageInsertionResult::try_from(2).unwrap(),
-            StorageInsertionResult::Replaced
-        );
-        assert_eq!(
-            StorageInsertionResult::try_from(3).unwrap(),
-            StorageInsertionResult::Deleted
-        );
-    }
-
-    #[test]
-    fn try_from_u8_invalid_returns_error() {
-        for v in [4, 5, 100, 255] {
-            assert!(
-                StorageInsertionResult::try_from(v).is_err(),
-                "expected error for discriminant {v}"
-            );
-        }
-    }
-
-    #[test]
-    fn repr_u8_round_trip() {
-        let variants = [
-            StorageInsertionResult::Outdated,
-            StorageInsertionResult::Inserted,
-            StorageInsertionResult::Replaced,
-            StorageInsertionResult::Deleted,
-        ];
-        for v in variants {
-            assert_eq!(StorageInsertionResult::try_from(v as u8).unwrap(), v);
-        }
-    }
 }
