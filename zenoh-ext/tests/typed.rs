@@ -159,6 +159,20 @@ async fn typed_publisher_encoding_uses_stable_schema_name() {
     );
 }
 
+#[test]
+fn schema_names_are_distinct_across_types() {
+    assert_ne!(
+        TelemetryPayload::SCHEMA_NAME,
+        GetConfigRequest::SCHEMA_NAME,
+        "Different types must have different SCHEMA_NAME values"
+    );
+    assert_ne!(
+        GetConfigRequest::SCHEMA_NAME,
+        DeviceConfig::SCHEMA_NAME,
+        "Different types must have different SCHEMA_NAME values"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_pub_sub_multiple_messages() {
     use zenoh_ext::TypedSessionExt;

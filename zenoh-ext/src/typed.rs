@@ -244,6 +244,10 @@ impl<'a, 'b, T: Serialize + TypedSchema> TypedPublisherBuilder<'a, 'b, T> {
 
     fn build(self) -> ZResult<TypedPublisher<'b, T>> {
         let key_expr = self.key_expr?;
+        debug_assert!(
+            !T::SCHEMA_NAME.is_empty(),
+            "TypedSchema::SCHEMA_NAME must not be empty"
+        );
         let encoding = Encoding::from(format!("zenoh-ext/typed:{}", T::SCHEMA_NAME));
         let inner = self
             .session
@@ -348,6 +352,10 @@ where
 }
 
 // -- Typed Query/Reply --
+//
+// Note: TypedQuery/TypedQueryable do not require `TypedSchema` because
+// the queryable path does not set a typed encoding on the wire. Schema
+// identification for queries is deferred to the typed RPC layer (M7).
 
 /// A typed query received by a [`TypedQueryable`].
 ///
