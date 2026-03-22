@@ -13,6 +13,7 @@
 //
 
 use std::{
+    collections::VecDeque,
     future::IntoFuture,
     sync::{Arc, Mutex},
     time::Duration,
@@ -371,7 +372,7 @@ impl EventSubscriber {
 
         let (sender, receiver) = flume::bounded::<Sample>(conf.buffer_size);
 
-        let live_buffer: Arc<Mutex<Vec<Sample>>> = Arc::new(Mutex::new(Vec::new()));
+        let live_buffer: Arc<Mutex<VecDeque<Sample>>> = Arc::new(Mutex::new(VecDeque::new()));
         let live_buffer_clone = live_buffer.clone();
         let live_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let live_ready_clone = live_ready.clone();
@@ -386,13 +387,13 @@ impl EventSubscriber {
                 } else {
                     let mut buf = zlock!(live_buffer_clone);
                     if buf.len() >= live_cap {
-                        buf.remove(0);
+                        buf.pop_front();
                         warn!(
                             "EventSubscriber live buffer full ({live_cap}), \
                              dropping oldest event during catch-up"
                         );
                     }
-                    buf.push(sample);
+                    buf.push_back(sample);
                 }
             })
             .wait()?;
@@ -517,15 +518,16 @@ impl EventSubscriber {
     /// Drain the live buffer, deduplicating against catch-up samples, and send
     /// remaining samples to the receiver channel.
     fn transition_to_live(
-        live_buffer: &Arc<Mutex<Vec<Sample>>>,
+        live_buffer: &Arc<Mutex<VecDeque<Sample>>>,
         last_catchup_ts: Option<Timestamp>,
         sender: &flume::Sender<Sample>,
         bookmark: &mut CursorBookmark,
     ) {
         let mut buf = zlock!(live_buffer);
-        buf.sort_by(|a, b| a.timestamp().cmp(&b.timestamp()));
+        let mut sorted: Vec<Sample> = buf.drain(..).collect();
+        sorted.sort_by(|a, b| a.timestamp().cmp(&b.timestamp()));
 
-        for sample in buf.drain(..) {
+        for sample in sorted {
             let dominated = match (sample.timestamp(), last_catchup_ts) {
                 (Some(live_ts), Some(catchup_ts)) => *live_ts <= catchup_ts,
                 _ => false,
