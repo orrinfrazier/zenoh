@@ -43,6 +43,8 @@ mod advanced_publisher;
 #[cfg(feature = "unstable")]
 mod advanced_subscriber;
 #[cfg(feature = "unstable")]
+mod cursor_persistence;
+#[cfg(feature = "unstable")]
 mod event_subscriber;
 #[cfg(feature = "unstable")]
 pub mod group;
@@ -78,6 +80,7 @@ pub use crate::{
         AdvancedSubscriber, AdvancedSubscriberBuilder, HistoryConfig, Miss, RecoveryConfig,
         SampleMissHandlerUndeclaration, SampleMissListener, SampleMissListenerBuilder,
     },
+    cursor_persistence::{CursorPersister, PutPersister},
     event_subscriber::{
         CursorBookmark, EventSubscriber, EventSubscriberBuilder, EventSubscriberBuilderExt,
     },
