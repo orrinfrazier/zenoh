@@ -17,6 +17,17 @@
 //! This module is intended for Zenoh's internal use.
 //!
 //! [Click here for Zenoh's documentation](https://docs.rs/zenoh/latest/zenoh)
+//!
+//! # Namespace-aware ACL authorization
+//!
+//! Decision priority (highest to lowest):
+//! 1. **Explicit deny** — per-subject deny rule matches the key expression
+//! 2. **Explicit allow** — per-subject allow rule matches the key expression
+//! 3. **Namespace deny** — key expression is outside the configured namespace prefix
+//! 4. **Default permission** — the configured default (Allow or Deny)
+//!
+//! When no namespace is configured, step 3 is skipped — the default permission applies directly.
+//! When no ACL rules are configured (empty policy map), only steps 3-4 apply.
 use std::collections::{HashMap, HashSet};
 
 use ahash::RandomState;
@@ -28,6 +39,7 @@ use zenoh_config::{
 use zenoh_keyexpr::{
     keyexpr,
     keyexpr_tree::{IKeyExprTree, IKeyExprTreeMut, IKeyExprTreeNode, KeBoxTree},
+    OwnedNonWildKeyExpr,
 };
 use zenoh_result::ZResult;
 
@@ -261,6 +273,7 @@ impl FlowPolicy {
 pub struct PolicyEnforcer {
     pub(crate) acl_enabled: bool,
     pub(crate) default_permission: Permission,
+    pub(crate) namespace: Option<OwnedNonWildKeyExpr>,
     pub(crate) subject_store: SubjectStore,
     pub(crate) policy_map: PolicyMap,
     pub(crate) interface_enabled: InterfaceEnabled,
@@ -277,9 +290,20 @@ impl PolicyEnforcer {
         PolicyEnforcer {
             acl_enabled: true,
             default_permission: Permission::Deny,
+            namespace: None,
             subject_store: SubjectStore::default(),
             policy_map: PolicyMap::default(),
             interface_enabled: InterfaceEnabled::default(),
+        }
+    }
+
+    /// Check if a key expression is under the configured namespace.
+    /// Returns true if no namespace is set, or if the key matches/is under the namespace prefix.
+    /// Uses the same `strip_nonwild_prefix` API as `ENamespace` for consistency.
+    fn is_under_namespace(&self, key_expr: &keyexpr) -> bool {
+        match &self.namespace {
+            None => true,
+            Some(ns) => key_expr.strip_nonwild_prefix(ns).is_some(),
         }
     }
 
@@ -308,7 +332,7 @@ impl PolicyEnforcer {
                     });
                     self.policy_map = PolicyMap::default();
                     self.subject_store = SubjectStore::default();
-                    if self.default_permission == Permission::Deny {
+                    if self.default_permission == Permission::Deny || self.namespace.is_some() {
                         self.interface_enabled = InterfaceEnabled {
                             ingress: true,
                             egress: true,
@@ -366,9 +390,23 @@ impl PolicyEnforcer {
                     }
                     self.policy_map = main_policy;
                     self.subject_store = policy_information.subject_map;
+                    if self.namespace.is_some() {
+                        self.interface_enabled = InterfaceEnabled {
+                            ingress: true,
+                            egress: true,
+                        };
+                    }
                 }
             } else {
                 bail!("All ACL rules/subjects/policies config lists must be provided");
+            }
+            if let Some(ns) = &self.namespace {
+                tracing::info!(
+                    "ACL auto-deny enabled for namespace '{}': keys outside '{}/{}' will be denied",
+                    ns.as_str(),
+                    ns.as_str(),
+                    "**"
+                );
             }
         }
         Ok(())
@@ -585,9 +623,26 @@ impl PolicyEnforcer {
         })
     }
 
-    /**
-     * Check each msg against the ACL ruleset for allow/deny
-     */
+    /// Return the default permission, but deny if the key is outside the namespace.
+    /// Priority: namespace deny > default permission.
+    pub(crate) fn namespace_aware_default(&self, key_expr: &keyexpr) -> Permission {
+        if !self.is_under_namespace(key_expr) {
+            return Permission::Deny;
+        }
+        self.default_permission
+    }
+
+    /// Check each msg against the ACL ruleset for allow/deny.
+    ///
+    /// ## Performance
+    ///
+    /// Called on every message. The namespace check (`namespace.is_none()` at the
+    /// fast-path branch and `is_under_namespace()` in `namespace_aware_default()`)
+    /// adds at most one `Option::is_none()` check and one `keyexpr::starts_with()`
+    /// comparison to the hot path. Both are O(1) operations on stack-local data —
+    /// no allocation, no lock, no syscall. When no namespace is configured, the
+    /// `is_none()` fast-path returns immediately without entering
+    /// `namespace_aware_default()`.
     pub fn policy_decision_point(
         &self,
         subject: usize,
@@ -597,10 +652,11 @@ impl PolicyEnforcer {
     ) -> ZResult<Permission> {
         let policy_map = &self.policy_map;
         if policy_map.is_empty() {
-            return Ok(self.default_permission);
+            return Ok(self.namespace_aware_default(key_expr));
         }
         match policy_map.get(&subject) {
             Some(single_policy) => {
+                // Priority: explicit deny > explicit allow > namespace deny > default permission
                 let deny_result = single_policy
                     .flow(flow)
                     .action(message)
@@ -610,9 +666,11 @@ impl PolicyEnforcer {
                 if deny_result {
                     return Ok(Permission::Deny);
                 }
-                if self.default_permission == Permission::Allow {
+                if self.default_permission == Permission::Allow && self.namespace.is_none() {
+                    // Fast path: default Allow, no namespace — no need to check allow tree
                     Ok(Permission::Allow)
                 } else {
+                    // Check explicit allow tree — explicit allow overrides namespace deny
                     let allow_result = single_policy
                         .flow(flow)
                         .action(message)
@@ -623,11 +681,311 @@ impl PolicyEnforcer {
                     if allow_result {
                         Ok(Permission::Allow)
                     } else {
-                        Ok(Permission::Deny)
+                        // No explicit allow — apply namespace deny then default permission
+                        Ok(self.namespace_aware_default(key_expr))
                     }
                 }
             }
-            None => Ok(self.default_permission),
+            None => Ok(self.namespace_aware_default(key_expr)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zenoh_config::{AclMessage, InterceptorFlow, Permission};
+    use zenoh_keyexpr::keyexpr;
+
+    /// Helper to create a PolicyEnforcer with namespace set.
+    fn enforcer_with_namespace(ns: &str, default_perm: Permission) -> PolicyEnforcer {
+        let mut enforcer = PolicyEnforcer::new();
+        enforcer.namespace = Some(
+            zenoh_keyexpr::OwnedNonWildKeyExpr::try_from(ns.to_string())
+                .expect("test namespace should be valid"),
+        );
+        enforcer.default_permission = default_perm;
+        enforcer
+    }
+
+    #[test]
+    fn namespace_denies_key_outside_namespace() {
+        // Router with namespace "tenant-a", default allow
+        // Key "tenant-b/data" is OUTSIDE namespace -> should be DENIED by auto-deny
+        let enforcer = enforcer_with_namespace("tenant-a", Permission::Allow);
+        let result = enforcer
+            .policy_decision_point(
+                0, // no matching subject in empty policy_map -> would normally return default_permission
+                InterceptorFlow::Ingress,
+                AclMessage::Put,
+                keyexpr::new("tenant-b/data").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Permission::Deny,
+            "key outside namespace should be denied"
+        );
+    }
+
+    #[test]
+    fn namespace_allows_key_inside_namespace() {
+        // Router with namespace "tenant-a", default allow
+        // Key "tenant-a/data" is INSIDE namespace -> should use default permission (Allow)
+        let enforcer = enforcer_with_namespace("tenant-a", Permission::Allow);
+        let result = enforcer
+            .policy_decision_point(
+                0,
+                InterceptorFlow::Ingress,
+                AclMessage::Put,
+                keyexpr::new("tenant-a/data").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Permission::Allow,
+            "key inside namespace should be allowed"
+        );
+    }
+
+    #[test]
+    fn namespace_allows_exact_namespace_key() {
+        // Key exactly matching the namespace (no trailing slash) should be allowed
+        let enforcer = enforcer_with_namespace("tenant-a", Permission::Allow);
+        let result = enforcer
+            .policy_decision_point(
+                0,
+                InterceptorFlow::Ingress,
+                AclMessage::Put,
+                keyexpr::new("tenant-a").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Permission::Allow,
+            "exact namespace key should be allowed"
+        );
+    }
+
+    #[test]
+    fn no_namespace_no_change() {
+        // No namespace configured -> default permission applies, no auto-deny
+        let mut enforcer = PolicyEnforcer::new();
+        enforcer.default_permission = Permission::Allow;
+        let result = enforcer
+            .policy_decision_point(
+                0,
+                InterceptorFlow::Ingress,
+                AclMessage::Put,
+                keyexpr::new("any/key/works").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Permission::Allow,
+            "no namespace should mean no auto-deny"
+        );
+    }
+
+    #[test]
+    fn namespace_applies_to_all_message_types() {
+        // Auto-deny should apply to all message types, not just Put
+        let enforcer = enforcer_with_namespace("ns1", Permission::Allow);
+        for msg_type in [
+            AclMessage::Put,
+            AclMessage::Delete,
+            AclMessage::Query,
+            AclMessage::Reply,
+            AclMessage::DeclareSubscriber,
+            AclMessage::DeclareQueryable,
+            AclMessage::LivelinessToken,
+            AclMessage::DeclareLivelinessSubscriber,
+            AclMessage::LivelinessQuery,
+        ] {
+            let result = enforcer
+                .policy_decision_point(
+                    0,
+                    InterceptorFlow::Ingress,
+                    msg_type,
+                    keyexpr::new("other/key").unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                result,
+                Permission::Deny,
+                "namespace auto-deny should apply to {:?}",
+                msg_type
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_applies_to_both_flows() {
+        // Auto-deny should apply to both ingress and egress
+        let enforcer = enforcer_with_namespace("ns1", Permission::Allow);
+        for flow in [InterceptorFlow::Ingress, InterceptorFlow::Egress] {
+            let result = enforcer
+                .policy_decision_point(
+                    0,
+                    flow,
+                    AclMessage::Put,
+                    keyexpr::new("other/key").unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                result,
+                Permission::Deny,
+                "namespace auto-deny should apply to {:?}",
+                flow
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_allow_overrides_namespace_deny() {
+        // Set up: namespace "ns1", default deny, explicit allow rule for "other/data"
+        // Key "other/data" is OUTSIDE namespace but has explicit allow -> should ALLOW
+        // Priority: explicit deny > explicit allow > namespace deny > default permission
+        let mut enforcer = PolicyEnforcer::new();
+        enforcer.namespace = Some(
+            zenoh_keyexpr::OwnedNonWildKeyExpr::try_from("ns1".to_string())
+                .expect("test namespace should be valid"),
+        );
+        enforcer.acl_enabled = true;
+        enforcer.default_permission = Permission::Deny;
+
+        // Build a minimal ACL config with an explicit allow for "other/data"
+        let acl_config = zenoh_config::AclConfig {
+            enabled: true,
+            default_permission: Permission::Deny,
+            rules: Some(vec![AclConfigRule {
+                id: "allow-cross-ns".to_string(),
+                permission: Permission::Allow,
+                flows: Some(
+                    vec![InterceptorFlow::Ingress, InterceptorFlow::Egress]
+                        .try_into()
+                        .unwrap(),
+                ),
+                messages: vec![AclMessage::Put].try_into().unwrap(),
+                key_exprs: vec!["other/data".try_into().unwrap()].try_into().unwrap(),
+            }]),
+            subjects: Some(vec![AclConfigSubjects {
+                id: "all".to_string(),
+                interfaces: None,
+                cert_common_names: None,
+                usernames: None,
+                link_protocols: None,
+                zids: None,
+            }]),
+            policies: Some(vec![AclConfigPolicyEntry {
+                id: None,
+                rules: vec!["allow-cross-ns".to_string()],
+                subjects: vec!["all".to_string()],
+            }]),
+        };
+
+        // Re-init with ACL config (preserving namespace)
+        enforcer.init(&acl_config).unwrap();
+
+        // Find the subject ID for "all"
+        let subject_query = SubjectQuery {
+            interface: None,
+            cert_common_name: None,
+            username: None,
+            link_protocol: None,
+            zid: None,
+        };
+        let subject_id = enforcer
+            .subject_store
+            .query(&subject_query)
+            .next()
+            .expect("should have a subject")
+            .id;
+
+        let result = enforcer
+            .policy_decision_point(
+                subject_id,
+                InterceptorFlow::Ingress,
+                AclMessage::Put,
+                keyexpr::new("other/data").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Permission::Allow,
+            "explicit allow should override namespace auto-deny"
+        );
+    }
+
+    #[test]
+    fn explicit_deny_still_wins_over_namespace() {
+        // Explicit deny should still take precedence (existing behavior preserved)
+        let mut enforcer = PolicyEnforcer::new();
+        enforcer.namespace = Some(
+            zenoh_keyexpr::OwnedNonWildKeyExpr::try_from("ns1".to_string())
+                .expect("test namespace should be valid"),
+        );
+        enforcer.acl_enabled = true;
+        enforcer.default_permission = Permission::Allow;
+
+        let acl_config = zenoh_config::AclConfig {
+            enabled: true,
+            default_permission: Permission::Allow,
+            rules: Some(vec![AclConfigRule {
+                id: "deny-inside".to_string(),
+                permission: Permission::Deny,
+                flows: Some(
+                    vec![InterceptorFlow::Ingress, InterceptorFlow::Egress]
+                        .try_into()
+                        .unwrap(),
+                ),
+                messages: vec![AclMessage::Put].try_into().unwrap(),
+                key_exprs: vec!["ns1/secret".try_into().unwrap()].try_into().unwrap(),
+            }]),
+            subjects: Some(vec![AclConfigSubjects {
+                id: "all".to_string(),
+                interfaces: None,
+                cert_common_names: None,
+                usernames: None,
+                link_protocols: None,
+                zids: None,
+            }]),
+            policies: Some(vec![AclConfigPolicyEntry {
+                id: None,
+                rules: vec!["deny-inside".to_string()],
+                subjects: vec!["all".to_string()],
+            }]),
+        };
+
+        enforcer.init(&acl_config).unwrap();
+
+        let subject_query = SubjectQuery {
+            interface: None,
+            cert_common_name: None,
+            username: None,
+            link_protocol: None,
+            zid: None,
+        };
+        let subject_id = enforcer
+            .subject_store
+            .query(&subject_query)
+            .next()
+            .expect("should have a subject")
+            .id;
+
+        // "ns1/secret" is inside namespace but has explicit deny -> DENY
+        let result = enforcer
+            .policy_decision_point(
+                subject_id,
+                InterceptorFlow::Ingress,
+                AclMessage::Put,
+                keyexpr::new("ns1/secret").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Permission::Deny,
+            "explicit deny should still take precedence"
+        );
     }
 }
