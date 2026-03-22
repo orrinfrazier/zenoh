@@ -328,3 +328,46 @@ async fn typed_queryable_malformed_request_yields_err() {
     drop(replies);
     handle.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_get_surfaces_reply_errors() {
+    use zenoh_ext::{TypedGetError, TypedSessionExt};
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    // Declare a raw queryable that replies with an error
+    let queryable = session
+        .declare_queryable("test/typed/query/reply_err")
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(async move {
+        let query = queryable.recv_async().await.unwrap();
+        // Reply with an error payload instead of a success
+        query
+            .reply_err(zenoh::bytes::ZBytes::from(b"service unavailable".as_ref()))
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let replies = session
+        .typed_get::<GetConfigRequest, DeviceConfig, _>(
+            "test/typed/query/reply_err",
+            &GetConfigRequest { device_id: 1 },
+        )
+        .await
+        .unwrap();
+
+    // The reply error should be surfaced, not silently dropped
+    assert_eq!(replies.len(), 1);
+    match &replies[0] {
+        Err(TypedGetError::ReplyError(payload)) => {
+            assert!(!payload.is_empty(), "error payload should not be empty");
+        }
+        other => panic!("expected TypedGetError::ReplyError, got {other:?}"),
+    }
+
+    handle.await.unwrap();
+}

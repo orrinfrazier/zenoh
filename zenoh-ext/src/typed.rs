@@ -36,6 +36,35 @@ use zenoh::{
 
 use crate::{z_deserialize, z_serialize, Deserialize, Serialize, ZDeserializeError};
 
+/// Error type for [`TypedSessionExt::typed_get`] operations.
+///
+/// Distinguishes between reply errors (the remote end sent an error reply)
+/// and deserialization errors (the reply payload could not be decoded).
+#[derive(Debug)]
+pub enum TypedGetError {
+    /// The remote queryable replied with an error payload.
+    ReplyError(ZBytes),
+    /// The reply payload could not be deserialized into the expected type.
+    Deserialization(ZDeserializeError),
+}
+
+impl std::fmt::Display for TypedGetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReplyError(_) => write!(f, "remote replied with error"),
+            Self::Deserialization(e) => write!(f, "deserialization failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TypedGetError {}
+
+impl From<ZDeserializeError> for TypedGetError {
+    fn from(e: ZDeserializeError) -> Self {
+        Self::Deserialization(e)
+    }
+}
+
 /// A publisher that only accepts payloads of type `T`.
 ///
 /// Wraps a [`Publisher`] and serializes `T` via [`ZSerializer`](crate::ZSerializer)
@@ -252,13 +281,15 @@ impl<Req: Deserialize, Resp: Serialize> IntoFuture for TypedQueryableBuilder<'_,
 
 /// A future that resolves to a vector of typed reply results.
 ///
-/// Returned by [`TypedSessionExt::typed_get`].
+/// Returned by [`TypedSessionExt::typed_get`]. Each element is either a
+/// successfully deserialized response or a [`TypedGetError`] indicating
+/// either a reply error from the remote or a deserialization failure.
 pub struct TypedGetFuture<Resp: Deserialize> {
-    result: ZResult<Vec<Result<Resp, ZDeserializeError>>>,
+    result: ZResult<Vec<Result<Resp, TypedGetError>>>,
 }
 
 impl<Resp: Deserialize> std::future::IntoFuture for TypedGetFuture<Resp> {
-    type Output = ZResult<Vec<Result<Resp, ZDeserializeError>>>;
+    type Output = ZResult<Vec<Result<Resp, TypedGetError>>>;
     type IntoFuture = Ready<Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -364,7 +395,7 @@ impl TypedSessionExt for Session {
         TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>,
     {
-        let result = (|| -> ZResult<Vec<Result<Resp, ZDeserializeError>>> {
+        let result = (|| -> ZResult<Vec<Result<Resp, TypedGetError>>> {
             let key_expr = key_expr.try_into().map_err(Into::into)?;
             let payload = z_serialize(request);
             let receiver = self.get(key_expr).payload(payload).wait()?;
@@ -372,10 +403,15 @@ impl TypedSessionExt for Session {
             while let Ok(reply) = receiver.recv() {
                 match reply.into_result() {
                     Ok(sample) => {
-                        replies.push(z_deserialize::<Resp>(sample.payload()));
+                        replies.push(
+                            z_deserialize::<Resp>(sample.payload())
+                                .map_err(TypedGetError::Deserialization),
+                        );
                     }
-                    Err(_reply_err) => {
-                        // Reply errors are not deserialization errors — skip them
+                    Err(reply_err) => {
+                        replies.push(Err(TypedGetError::ReplyError(
+                            reply_err.payload().clone(),
+                        )));
                     }
                 }
             }

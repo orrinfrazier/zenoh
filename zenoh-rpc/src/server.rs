@@ -30,6 +30,23 @@ use crate::error::{ServiceError, StatusCode};
 use zenoh_ext::{z_deserialize, z_serialize};
 
 /// Attachment key used to identify the RPC method being invoked.
+///
+/// # Attachment format
+///
+/// RPC metadata (method name, deadline, status code) is transmitted as a
+/// `HashMap<String, String>` serialized via `z_serialize`. This text-based
+/// format was chosen over a binary encoding for three reasons:
+///
+/// - **Debuggability**: Attachments are human-readable in logs, traces, and
+///   the zenoh admin space. Binary encodings require tooling to inspect.
+/// - **Negligible overhead**: RPC attachments contain 2-3 small key-value
+///   pairs. The serialization cost is dwarfed by network round-trip latency.
+/// - **Interoperability**: Text key-value pairs are language-agnostic and do
+///   not require schema negotiation between client and server.
+///
+/// A binary format could reduce per-message overhead by ~100-200 bytes, but
+/// the added complexity (versioned encoding, debugging tools, cross-language
+/// parity) is not justified at the current scale.
 pub const METHOD_ATTACHMENT_KEY: &str = "rpc:method";
 
 /// Status code attachment key for replies.
