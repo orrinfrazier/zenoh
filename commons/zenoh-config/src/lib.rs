@@ -876,6 +876,10 @@ validated_struct::validator! {
         /// will put a message into "1/my/keyexpr". Same applies to all other operations within this session.
         pub namespace: Option<OwnedNonWildKeyExpr>,
 
+        /// Maximum number of transport connections allowed.
+        /// When set, new connections beyond this limit will be rejected.
+        pub max_connections: Option<usize>,
+
         /// Configuration of the downsampling.
         downsampling: Vec<DownsamplingItemConf> where (downsampling_validator),
 
