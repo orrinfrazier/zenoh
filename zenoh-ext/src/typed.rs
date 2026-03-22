@@ -345,6 +345,10 @@ where
     Handler::Handler: Send,
 {
     fn build(self) -> ZResult<TypedSubscriber<T, Handler::Handler>> {
+        assert!(
+            !T::SCHEMA_NAME.trim().is_empty(),
+            "TypedSchema::SCHEMA_NAME must not be empty or whitespace-only"
+        );
         let key_expr = self.key_expr?;
         let inner = self
             .session
