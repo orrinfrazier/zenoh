@@ -480,6 +480,79 @@ async fn event_subscriber_live_buffer_does_not_exceed_capacity() {
 }
 
 // ---------------------------------------------------------------------------
+// consumer_name validation — issue #148
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_rejects_empty_consumer_name() {
+    zenoh_util::init_log_from_env_or("error");
+    let session = open_test_session();
+
+    let result = session
+        .declare_subscriber("test/validate/empty")
+        .event()
+        .consumer_name("")
+        .wait();
+
+    assert!(result.is_err(), "empty consumer_name should be rejected");
+    session.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_rejects_consumer_name_with_slash() {
+    zenoh_util::init_log_from_env_or("error");
+    let session = open_test_session();
+
+    let result = session
+        .declare_subscriber("test/validate/slash")
+        .event()
+        .consumer_name("bad/name")
+        .wait();
+
+    assert!(result.is_err(), "consumer_name with '/' should be rejected");
+    session.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_rejects_consumer_name_with_wildcard() {
+    zenoh_util::init_log_from_env_or("error");
+    let session = open_test_session();
+
+    for ch in ['*', '?', '$', '#'] {
+        let name = format!("bad{ch}name");
+        let result = session
+            .declare_subscriber("test/validate/wildcard")
+            .event()
+            .consumer_name(&name)
+            .wait();
+
+        assert!(
+            result.is_err(),
+            "consumer_name with '{ch}' should be rejected"
+        );
+    }
+    session.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_accepts_valid_consumer_name() {
+    zenoh_util::init_log_from_env_or("error");
+    let session = open_test_session();
+
+    // Alphanumeric, hyphens, underscores, dots should all be valid
+    for name in ["my-consumer", "consumer_1", "app.worker.3", "UPPERCASE"] {
+        let result = session
+            .declare_subscriber("test/validate/valid")
+            .event()
+            .consumer_name(name)
+            .wait();
+
+        assert!(result.is_ok(), "consumer_name '{name}' should be accepted");
+    }
+    session.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests — issue #42
 // ---------------------------------------------------------------------------
 
