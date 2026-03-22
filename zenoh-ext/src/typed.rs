@@ -147,6 +147,21 @@ fn check_schema_version(
     Ok(())
 }
 
+/// Check that a sample's encoding matches the expected typed encoding.
+/// Returns `Ok(())` if the encoding matches `zenoh-ext/typed:{schema_name}`.
+/// Returns `Err(TypedReceiveError::EncodingMismatch)` if it does not match.
+fn check_encoding(sample: &Sample, schema_name: &str) -> Result<(), TypedReceiveError> {
+    let expected = Encoding::from(format!("zenoh-ext/typed:{}", schema_name));
+    let received = sample.encoding();
+    if *received != expected {
+        return Err(TypedReceiveError::EncodingMismatch {
+            expected: expected.to_string(),
+            received: received.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// A publisher that only accepts payloads of type `T`.
 ///
 /// Wraps a [`Publisher`] and serializes `T` via [`ZSerializer`](crate::ZSerializer)
@@ -515,21 +530,6 @@ pub trait TypedSessionExt {
     where
         TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>;
-}
-
-/// Check that a sample's encoding matches the expected typed encoding.
-/// Returns `Ok(())` if the encoding matches `zenoh-ext/typed:{schema_name}`.
-/// Returns `Err(TypedReceiveError::EncodingMismatch)` if it does not match.
-fn check_encoding(sample: &Sample, schema_name: &str) -> Result<(), TypedReceiveError> {
-    let expected = Encoding::from(format!("zenoh-ext/typed:{}", schema_name));
-    let received = sample.encoding();
-    if *received != expected {
-        return Err(TypedReceiveError::EncodingMismatch {
-            expected: expected.to_string(),
-            received: received.to_string(),
-        });
-    }
-    Ok(())
 }
 
 impl TypedSessionExt for Session {
