@@ -181,6 +181,11 @@ pub enum History {
     All,
 }
 
+/// Result of a storage write operation.
+///
+/// `#[repr(u8)]` with explicit discriminants ensures stable wire serialization
+/// for acknowledged put/delete replies, where the result is sent as a single
+/// byte in the query response payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StorageInsertionResult {
