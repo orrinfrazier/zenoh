@@ -176,6 +176,7 @@ impl<'a, 'b> EventSubscriberBuilderExt<'a, 'b> for SubscriberBuilder<'a, 'b, Def
             cursor_persister: None,
             cursor_load_timeout: Duration::from_secs(5),
             catch_up_timeout: Duration::from_secs(10),
+            live_buffer_capacity: 10_000,
         }
     }
 }
@@ -200,6 +201,7 @@ pub struct EventSubscriberBuilder<'a, 'b> {
     pub(crate) cursor_persister: Option<Arc<dyn CursorPersister>>,
     pub(crate) cursor_load_timeout: Duration,
     pub(crate) catch_up_timeout: Duration,
+    pub(crate) live_buffer_capacity: usize,
 }
 
 #[zenoh_macros::unstable]
@@ -247,6 +249,20 @@ impl<'a, 'b> EventSubscriberBuilder<'a, 'b> {
     /// Set the timeout for the catch-up query on startup (default: 10s).
     pub fn catch_up_timeout(mut self, timeout: Duration) -> Self {
         self.catch_up_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of live events buffered during catch-up (default: 10,000).
+    ///
+    /// During the catch-up phase, live events accumulate in a buffer. On
+    /// high-throughput topics this buffer could grow unbounded. When the buffer
+    /// reaches `capacity`, the oldest events are dropped and a warning is logged.
+    ///
+    /// Events dropped from the live buffer are still available via the catch-up
+    /// query (they have earlier timestamps), so data loss only occurs if the
+    /// catch-up window is shorter than the burst duration.
+    pub fn live_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.live_buffer_capacity = capacity;
         self
     }
 
@@ -360,6 +376,7 @@ impl EventSubscriber {
         let live_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let live_ready_clone = live_ready.clone();
         let sender_clone = sender.clone();
+        let live_cap = conf.live_buffer_capacity;
 
         let subscriber = session
             .declare_subscriber(key_expr.clone())
@@ -368,6 +385,13 @@ impl EventSubscriber {
                     let _ = sender_clone.send(sample);
                 } else {
                     let mut buf = zlock!(live_buffer_clone);
+                    if buf.len() >= live_cap {
+                        buf.remove(0);
+                        warn!(
+                            "EventSubscriber live buffer full ({live_cap}), \
+                             dropping oldest event during catch-up"
+                        );
+                    }
                     buf.push(sample);
                 }
             })
