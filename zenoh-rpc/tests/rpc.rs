@@ -15,7 +15,9 @@
 use std::time::Duration;
 
 use zenoh_ext::{z_deserialize, z_serialize};
-use zenoh_rpc::{deadline_attachment, DeadlineContext, ServiceError, StatusCode, DEADLINE_ATTACHMENT_KEY};
+use zenoh_rpc::{
+    deadline_attachment, DeadlineContext, ServiceError, StatusCode, DEADLINE_ATTACHMENT_KEY,
+};
 
 // -- Round-trip serialization for each variant --
 
@@ -221,7 +223,10 @@ fn deadline_context_remaining_returns_positive_for_future_deadline() {
 
     let remaining = ctx.remaining();
     // Should be close to 10 seconds (allow some margin for test execution)
-    assert!(remaining > Duration::from_secs(9), "remaining: {remaining:?}");
+    assert!(
+        remaining > Duration::from_secs(9),
+        "remaining: {remaining:?}"
+    );
     assert!(
         remaining <= Duration::from_secs(10),
         "remaining: {remaining:?}"

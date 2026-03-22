@@ -102,9 +102,7 @@ async fn call_nonexistent_method_returns_method_not_found() {
     let ke = unique_ke("not_found");
 
     let _server = ServiceServer::builder(&session, ke.as_str())
-        .method_fn("exists", |_query| {
-            Box::pin(async { Ok(ZBytes::default()) })
-        })
+        .method_fn("exists", |_query| Box::pin(async { Ok(ZBytes::default()) }))
         .await
         .expect("server should start");
 
@@ -136,8 +134,8 @@ async fn deadline_attachment_is_set_on_query() {
         .method_fn("check_deadline", |query| {
             Box::pin(async move {
                 // Extract the deadline from the query's attachment
-                let ctx = DeadlineContext::from_query(query)
-                    .ok_or_else(|| ServiceError::Internal {
+                let ctx =
+                    DeadlineContext::from_query(query).ok_or_else(|| ServiceError::Internal {
                         message: "no deadline attachment found".to_string(),
                     })?;
 
@@ -187,8 +185,8 @@ async fn custom_timeout_overrides_default() {
     let _server = ServiceServer::builder(&session, ke.as_str())
         .method_fn("check_deadline", |query| {
             Box::pin(async move {
-                let ctx = DeadlineContext::from_query(query)
-                    .ok_or_else(|| ServiceError::Internal {
+                let ctx =
+                    DeadlineContext::from_query(query).ok_or_else(|| ServiceError::Internal {
                         message: "no deadline attachment".to_string(),
                     })?;
                 let remaining_ms = ctx.remaining().as_millis() as u64;
@@ -271,10 +269,7 @@ async fn method_attachment_is_present() {
                     z_deserialize(attachment).map_err(|_| ServiceError::Internal {
                         message: "failed to deserialize attachment".to_string(),
                     })?;
-                let method = map
-                    .get(METHOD_ATTACHMENT_KEY)
-                    .cloned()
-                    .unwrap_or_default();
+                let method = map.get(METHOD_ATTACHMENT_KEY).cloned().unwrap_or_default();
                 let has_deadline = map.contains_key(DEADLINE_ATTACHMENT_KEY);
                 let result = format!("{method}:{has_deadline}");
                 Ok(z_serialize(&result))

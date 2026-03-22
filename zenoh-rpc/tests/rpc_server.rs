@@ -133,8 +133,7 @@ async fn missing_method_attachment_returns_invalid_request() {
         .expect("channel closed");
 
     let reply_err = reply.into_result().expect_err("should be an error reply");
-    let err: ServiceError =
-        z_deserialize(reply_err.payload()).expect("deserialize ServiceError");
+    let err: ServiceError = z_deserialize(reply_err.payload()).expect("deserialize ServiceError");
     assert_eq!(
         err,
         ServiceError::InvalidRequest {
@@ -170,8 +169,7 @@ async fn unknown_method_returns_method_not_found() {
         .expect("channel closed");
 
     let reply_err = reply.into_result().expect_err("should be an error reply");
-    let err: ServiceError =
-        z_deserialize(reply_err.payload()).expect("deserialize ServiceError");
+    let err: ServiceError = z_deserialize(reply_err.payload()).expect("deserialize ServiceError");
     assert_eq!(
         err,
         ServiceError::MethodNotFound {
@@ -213,8 +211,7 @@ async fn handler_error_is_propagated() {
         .expect("channel closed");
 
     let reply_err = reply.into_result().expect_err("should be an error reply");
-    let err: ServiceError =
-        z_deserialize(reply_err.payload()).expect("deserialize ServiceError");
+    let err: ServiceError = z_deserialize(reply_err.payload()).expect("deserialize ServiceError");
     assert_eq!(
         err,
         ServiceError::Internal {
@@ -253,12 +250,12 @@ async fn success_reply_has_ok_status_attachment() {
     let sample = reply.into_result().expect("reply should be Ok");
 
     // Check the status code attachment
-    let attachment = sample.attachment().expect("reply should have an attachment");
+    let attachment = sample
+        .attachment()
+        .expect("reply should have an attachment");
     let map: HashMap<String, String> =
         z_deserialize(attachment).expect("deserialize attachment map");
-    let status_str = map
-        .get("rpc:status")
-        .expect("should have rpc:status key");
+    let status_str = map.get("rpc:status").expect("should have rpc:status key");
     assert_eq!(status_str, "0", "status code should be Ok (0)");
 }
 
