@@ -14,7 +14,9 @@
 
 use std::time::Duration;
 
-use zenoh_ext::{Deserialize, Serialize, ZDeserializeError, ZDeserializer, ZSerializer};
+use zenoh_ext::{
+    Deserialize, Serialize, TypedSchema, ZDeserializeError, ZDeserializer, ZSerializer,
+};
 
 // -- Test payload types --
 
@@ -41,6 +43,10 @@ impl Deserialize for TelemetryPayload {
             label: deserializer.deserialize()?,
         })
     }
+}
+
+impl TypedSchema for TelemetryPayload {
+    const SCHEMA_NAME: &'static str = "telemetry-payload";
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -123,6 +129,47 @@ async fn typed_publisher_sets_encoding() {
     assert!(
         encoding_str.contains("typed"),
         "Encoding should contain 'typed' marker, got: {encoding_str}"
+    );
+}
+
+/// Verify encoding uses the stable `TypedSchema::SCHEMA_NAME`, not `std::any::type_name`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_publisher_encoding_uses_stable_schema_name() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    let publisher = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/encoding/stable")
+        .await
+        .unwrap();
+
+    let encoding_str = format!("{}", publisher.encoding());
+
+    // Must use the TypedSchema name, not std::any::type_name
+    assert_eq!(
+        encoding_str, "zenoh-ext/typed:telemetry-payload",
+        "Encoding must use TypedSchema::SCHEMA_NAME, got: {encoding_str}"
+    );
+
+    // Verify it does NOT contain the Rust module path (from type_name)
+    assert!(
+        !encoding_str.contains("::"),
+        "Encoding must not contain Rust module paths: {encoding_str}"
+    );
+}
+
+#[test]
+fn schema_names_are_distinct_across_types() {
+    assert_ne!(
+        TelemetryPayload::SCHEMA_NAME,
+        GetConfigRequest::SCHEMA_NAME,
+        "Different types must have different SCHEMA_NAME values"
+    );
+    assert_ne!(
+        GetConfigRequest::SCHEMA_NAME,
+        DeviceConfig::SCHEMA_NAME,
+        "Different types must have different SCHEMA_NAME values"
     );
 }
 
@@ -225,6 +272,10 @@ impl Deserialize for GetConfigRequest {
     }
 }
 
+impl TypedSchema for GetConfigRequest {
+    const SCHEMA_NAME: &'static str = "get-config-request";
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct DeviceConfig {
     device_id: u32,
@@ -248,6 +299,10 @@ impl Deserialize for DeviceConfig {
             enabled: deserializer.deserialize()?,
         })
     }
+}
+
+impl TypedSchema for DeviceConfig {
+    const SCHEMA_NAME: &'static str = "device-config";
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -301,9 +356,7 @@ async fn typed_queryable_malformed_request_yields_err() {
     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
 
     let queryable = session
-        .declare_typed_queryable::<GetConfigRequest, DeviceConfig, _>(
-            "test/typed/query/malformed",
-        )
+        .declare_typed_queryable::<GetConfigRequest, DeviceConfig, _>("test/typed/query/malformed")
         .await
         .unwrap();
 
@@ -404,9 +457,15 @@ async fn typed_pub_sub_version_mismatch_yields_err() {
     assert!(received.is_err());
     let err = received.unwrap_err();
     match err {
-        zenoh_ext::TypedReceiveError::VersionMismatch { expected, received, .. } => {
+        zenoh_ext::TypedReceiveError::VersionMismatch {
+            expected,
+            received,
+            type_name,
+        } => {
             assert_eq!(expected, 3);
             assert_eq!(received, 2);
+            // Error message must use the stable schema name
+            assert_eq!(type_name, "telemetry-payload");
         }
         other => panic!("Expected VersionMismatch, got: {other:?}"),
     }

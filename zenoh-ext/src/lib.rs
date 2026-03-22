@@ -51,11 +51,11 @@ mod publisher_ext;
 #[cfg(feature = "unstable")]
 mod querying_subscriber;
 mod serialization;
-mod typed;
 #[cfg(feature = "unstable")]
 mod session_ext;
 #[cfg(feature = "unstable")]
 mod subscriber_ext;
+mod typed;
 #[cfg(feature = "unstable")]
 mod utils;
 
@@ -67,7 +67,7 @@ pub use crate::serialization::{
 };
 pub use crate::typed::{
     TypedGetFuture, TypedPublisher, TypedPublisherBuilder, TypedQuery, TypedQueryable,
-    TypedQueryableBuilder, TypedReceiveError, TypedSessionExt, TypedSubscriber,
+    TypedQueryableBuilder, TypedReceiveError, TypedSchema, TypedSessionExt, TypedSubscriber,
     TypedSubscriberBuilder,
 };
 #[cfg(feature = "unstable")]
