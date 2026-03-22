@@ -244,9 +244,9 @@ impl<'a, 'b, T: Serialize + TypedSchema> TypedPublisherBuilder<'a, 'b, T> {
 
     fn build(self) -> ZResult<TypedPublisher<'b, T>> {
         let key_expr = self.key_expr?;
-        debug_assert!(
-            !T::SCHEMA_NAME.is_empty(),
-            "TypedSchema::SCHEMA_NAME must not be empty"
+        assert!(
+            !T::SCHEMA_NAME.trim().is_empty(),
+            "TypedSchema::SCHEMA_NAME must not be empty or whitespace-only"
         );
         let encoding = Encoding::from(format!("zenoh-ext/typed:{}", T::SCHEMA_NAME));
         let inner = self
