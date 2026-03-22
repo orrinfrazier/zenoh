@@ -78,6 +78,14 @@ async fn test_acl_liveliness() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_acl_namespace_auto_deny() {
+    zenoh::init_log_from_env_or("error");
+    test_namespace_auto_deny_blocks_outside(27460).await;
+    test_namespace_no_namespace_no_change(27460).await;
+    test_namespace_cross_namespace_blocked(27461).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_acl_interface_names() {
     zenoh::init_log_from_env_or("error");
 
@@ -2180,8 +2188,8 @@ async fn test_namespace_no_namespace_no_change(port: u16) {
 async fn test_namespace_cross_namespace_blocked(port: u16) {
     println!("test_namespace_cross_namespace_blocked");
     // Two clients with different namespaces through a router with namespace "ns1"
-    // Client A (namespace "ns1") publishes to "data" → becomes "ns1/data" on the wire
-    // Client B (namespace "ns2") subscribes to "data" → expects "ns2/data" on the wire
+    // Client A (namespace "ns1") publishes to "data" -> becomes "ns1/data" on the wire
+    // Client B (namespace "ns2") subscribes to "data" -> expects "ns2/data" on the wire
     // Router with namespace "ns1" blocks "ns2/**" traffic
     let mut config_router = get_basic_router_config(port).await;
     config_router.namespace = Some(
@@ -2242,7 +2250,7 @@ async fn test_namespace_cross_namespace_blocked(port: u16) {
         publisher.put(VALUE).await.unwrap();
         tokio::time::sleep(SLEEP).await;
 
-        // Client B should NOT receive — cross-namespace traffic is blocked
+        // Client B should NOT receive -- cross-namespace traffic is blocked
         assert_ne!(
             *zlock!(received_value),
             VALUE,

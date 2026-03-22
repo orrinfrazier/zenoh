@@ -299,11 +299,15 @@ impl PolicyEnforcer {
 
     /// Check if a key expression is under the configured namespace.
     /// Returns true if no namespace is set, or if the key matches/is under the namespace prefix.
-    /// Uses the same `strip_nonwild_prefix` API as `ENamespace` for consistency.
+    /// `strip_nonwild_prefix` returns `None` when the key exactly equals the prefix (no
+    /// remaining suffix), so we also check for exact equality.
     fn is_under_namespace(&self, key_expr: &keyexpr) -> bool {
         match &self.namespace {
             None => true,
-            Some(ns) => key_expr.strip_nonwild_prefix(ns).is_some(),
+            Some(ns) => {
+                key_expr.as_str() == ns.as_str()
+                    || key_expr.strip_nonwild_prefix(ns).is_some()
+            }
         }
     }
 
