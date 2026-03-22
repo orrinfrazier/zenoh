@@ -203,3 +203,128 @@ async fn typed_subscriber_blocking_recv() {
 
     assert_eq!(received, payload);
 }
+
+// -- Query/Reply test types --
+
+#[derive(Debug, Clone, PartialEq)]
+struct GetConfigRequest {
+    device_id: u32,
+}
+
+impl Serialize for GetConfigRequest {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serializer.serialize(self.device_id);
+    }
+}
+
+impl Deserialize for GetConfigRequest {
+    fn deserialize(deserializer: &mut ZDeserializer) -> Result<Self, ZDeserializeError> {
+        Ok(Self {
+            device_id: deserializer.deserialize()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeviceConfig {
+    device_id: u32,
+    hostname: String,
+    enabled: bool,
+}
+
+impl Serialize for DeviceConfig {
+    fn serialize(&self, serializer: &mut ZSerializer) {
+        serializer.serialize(self.device_id);
+        serializer.serialize(&self.hostname);
+        serializer.serialize(self.enabled);
+    }
+}
+
+impl Deserialize for DeviceConfig {
+    fn deserialize(deserializer: &mut ZDeserializer) -> Result<Self, ZDeserializeError> {
+        Ok(Self {
+            device_id: deserializer.deserialize()?,
+            hostname: deserializer.deserialize()?,
+            enabled: deserializer.deserialize()?,
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_query_reply_round_trip() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    let queryable = session
+        .declare_typed_queryable::<GetConfigRequest, DeviceConfig, _>("test/typed/query/config")
+        .await
+        .unwrap();
+
+    // Spawn handler
+    let handle = tokio::spawn(async move {
+        let typed_query = queryable.recv_async().await.unwrap();
+        let req = typed_query.request().unwrap();
+        assert_eq!(req.device_id, 42);
+
+        let resp = DeviceConfig {
+            device_id: req.device_id,
+            hostname: "switch-42".to_string(),
+            enabled: true,
+        };
+        typed_query.reply(&resp).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let replies = session
+        .typed_get::<GetConfigRequest, DeviceConfig, _>(
+            "test/typed/query/config",
+            &GetConfigRequest { device_id: 42 },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(replies.len(), 1);
+    let config = replies[0].as_ref().unwrap();
+    assert_eq!(config.device_id, 42);
+    assert_eq!(config.hostname, "switch-42");
+    assert!(config.enabled);
+
+    handle.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_queryable_malformed_request_yields_err() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    let queryable = session
+        .declare_typed_queryable::<GetConfigRequest, DeviceConfig, _>(
+            "test/typed/query/malformed",
+        )
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(async move {
+        let typed_query = queryable.recv_async().await.unwrap();
+        // Request should fail to deserialize
+        assert!(typed_query.request().is_err());
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send raw garbage payload via session.get()
+    let replies: Vec<_> = session
+        .get("test/typed/query/malformed")
+        .payload(vec![0u8, 1, 2])
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    // Queryable won't reply since request parsing failed — replies may be empty
+    drop(replies);
+    handle.await.unwrap();
+}

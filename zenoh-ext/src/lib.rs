@@ -66,8 +66,8 @@ pub use crate::serialization::{
     ZReadIter, ZSerializer,
 };
 pub use crate::typed::{
-    TypedPublisher, TypedPublisherBuilder, TypedSessionExt, TypedSubscriber,
-    TypedSubscriberBuilder,
+    TypedGetFuture, TypedPublisher, TypedPublisherBuilder, TypedQuery, TypedQueryable,
+    TypedQueryableBuilder, TypedSessionExt, TypedSubscriber, TypedSubscriberBuilder,
 };
 #[cfg(feature = "unstable")]
 #[allow(deprecated)]
