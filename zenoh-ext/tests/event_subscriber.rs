@@ -363,6 +363,47 @@ async fn event_subscriber_builder_custom_flush_interval() {
     session.close().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_builder_custom_timeouts() {
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = open_test_session();
+
+    // Custom timeouts should be accepted and subscriber should construct successfully
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/event_sub/custom_timeouts")
+        .event()
+        .consumer_name("timeout-consumer")
+        .cursor_load_timeout(Duration::from_secs(2))
+        .catch_up_timeout(Duration::from_secs(3)))
+    .unwrap();
+
+    // Verify subscriber is functional
+    assert_eq!(sub.cursor_position(), None);
+
+    session.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_builder_very_short_timeouts() {
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = open_test_session();
+
+    // Even very short timeouts should not panic — they just mean no catch-up
+    let sub: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/event_sub/short_timeouts")
+        .event()
+        .consumer_name("short-timeout-consumer")
+        .cursor_load_timeout(Duration::from_millis(1))
+        .catch_up_timeout(Duration::from_millis(1)))
+    .unwrap();
+
+    assert_eq!(sub.cursor_position(), None);
+
+    session.close().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests — issue #42
 // ---------------------------------------------------------------------------
