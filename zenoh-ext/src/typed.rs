@@ -25,7 +25,7 @@ use std::{
 
 use zenoh::{
     bytes::{Encoding, ZBytes},
-    handlers::FifoChannelHandler,
+    handlers::{DefaultHandler, FifoChannelHandler},
     key_expr::KeyExpr,
     pubsub::{Publisher, Subscriber},
     query::{Query, Queryable},
@@ -67,12 +67,15 @@ impl<T: Serialize> TypedPublisher<'_, T> {
 ///
 /// Wraps a [`Subscriber`] and yields `Result<T, ZDeserializeError>` on each
 /// received sample. Malformed payloads yield `Err`, never panic.
-pub struct TypedSubscriber<T: Deserialize> {
-    inner: Subscriber<FifoChannelHandler<Sample>>,
+///
+/// The `Handler` type parameter defaults to [`FifoChannelHandler<Sample>`].
+/// Use [`TypedSubscriberBuilder::with`] to specify a custom handler.
+pub struct TypedSubscriber<T: Deserialize, Handler = FifoChannelHandler<Sample>> {
+    inner: Subscriber<Handler>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Deserialize> TypedSubscriber<T> {
+impl<T: Deserialize> TypedSubscriber<T, FifoChannelHandler<Sample>> {
     /// Wait for an incoming typed message.
     ///
     /// The outer `ZResult` fails only if the channel is closed.
@@ -87,10 +90,17 @@ impl<T: Deserialize> TypedSubscriber<T> {
         let sample = self.inner.recv()?;
         Ok(z_deserialize::<T>(sample.payload()))
     }
+}
 
+impl<T: Deserialize, Handler> TypedSubscriber<T, Handler> {
     /// Returns the [`KeyExpr`] this subscriber is subscribed to.
     pub fn key_expr(&self) -> &KeyExpr<'static> {
         self.inner.key_expr()
+    }
+
+    /// Returns a reference to the inner handler.
+    pub fn handler(&self) -> &Handler {
+        self.inner.handler()
     }
 }
 
@@ -128,16 +138,45 @@ impl<'b, T: Serialize> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
 }
 
 /// Builder for [`TypedSubscriber`].
-pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize> {
+///
+/// By default, uses [`FifoChannelHandler`] (the zenoh default handler).
+/// Use [`.with(handler)`](TypedSubscriberBuilder::with) to specify a custom handler.
+pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize, Handler = DefaultHandler> {
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
+    handler: Handler,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Deserialize> TypedSubscriberBuilder<'_, '_, T> {
-    fn build(self) -> ZResult<TypedSubscriber<T>> {
+impl<'a, 'b, T: Deserialize> TypedSubscriberBuilder<'a, 'b, T, DefaultHandler> {
+    /// Specify a custom handler for this subscriber.
+    ///
+    /// The handler must implement [`IntoHandler<Sample>`].
+    pub fn with<Handler>(self, handler: Handler) -> TypedSubscriberBuilder<'a, 'b, T, Handler>
+    where
+        Handler: zenoh::handlers::IntoHandler<Sample>,
+    {
+        TypedSubscriberBuilder {
+            session: self.session,
+            key_expr: self.key_expr,
+            handler,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T: Deserialize, Handler> TypedSubscriberBuilder<'_, '_, T, Handler>
+where
+    Handler: zenoh::handlers::IntoHandler<Sample> + Send,
+    Handler::Handler: Send,
+{
+    fn build(self) -> ZResult<TypedSubscriber<T, Handler::Handler>> {
         let key_expr = self.key_expr?;
-        let inner = self.session.declare_subscriber(key_expr).wait()?;
+        let inner = self
+            .session
+            .declare_subscriber(key_expr)
+            .with(self.handler)
+            .wait()?;
         Ok(TypedSubscriber {
             inner,
             _phantom: PhantomData,
@@ -145,8 +184,12 @@ impl<T: Deserialize> TypedSubscriberBuilder<'_, '_, T> {
     }
 }
 
-impl<T: Deserialize> IntoFuture for TypedSubscriberBuilder<'_, '_, T> {
-    type Output = ZResult<TypedSubscriber<T>>;
+impl<T: Deserialize, Handler> IntoFuture for TypedSubscriberBuilder<'_, '_, T, Handler>
+where
+    Handler: zenoh::handlers::IntoHandler<Sample> + Send,
+    Handler::Handler: Send,
+{
+    type Output = ZResult<TypedSubscriber<T, Handler::Handler>>;
     type IntoFuture = Ready<Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -336,6 +379,7 @@ impl TypedSessionExt for Session {
         TypedSubscriberBuilder {
             session: self,
             key_expr: key_expr.try_into().map_err(Into::into),
+            handler: DefaultHandler::default(),
             _phantom: PhantomData,
         }
     }
