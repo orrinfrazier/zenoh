@@ -36,6 +36,30 @@ use zenoh::{
 
 use crate::{z_deserialize, z_serialize, Deserialize, Serialize, ZDeserializeError};
 
+/// Trait for types that provide a stable, user-defined schema name.
+///
+/// `std::any::type_name` is not guaranteed stable across Rust compiler versions,
+/// so types used with [`TypedPublisher`] and [`TypedSubscriber`] must implement
+/// this trait to provide a fixed identifier for wire encoding and error messages.
+///
+/// The schema name is embedded in the Zenoh [`Encoding`](zenoh::bytes::Encoding)
+/// as `zenoh-ext/typed:{SCHEMA_NAME}`, making it cross-language compatible
+/// (Python/C++ clients can match on the same string).
+///
+/// # Example
+/// ```ignore
+/// impl TypedSchema for TelemetryPayload {
+///     const SCHEMA_NAME: &'static str = "telemetry-payload";
+/// }
+/// ```
+pub trait TypedSchema {
+    /// A stable, human-readable name for this type's schema.
+    ///
+    /// Must be unique per type within your application and stable across
+    /// compiler versions and languages.
+    const SCHEMA_NAME: &'static str;
+}
+
 /// Error type for typed receive operations that include version checking.
 #[derive(Debug)]
 pub enum TypedReceiveError {
@@ -91,9 +115,10 @@ fn decode_schema_version(zbytes: &ZBytes) -> Option<u32> {
 /// Check if a sample's attachment carries a matching schema version.
 /// Returns Ok(()) if version matches or no version checking is configured.
 /// Returns Err(TypedReceiveError::VersionMismatch) on mismatch.
-fn check_schema_version<T>(
+fn check_schema_version(
     sample: &Sample,
     expected_version: Option<u32>,
+    schema_name: &str,
 ) -> Result<(), TypedReceiveError> {
     let expected = match expected_version {
         Some(v) => v,
@@ -107,7 +132,7 @@ fn check_schema_version<T>(
                 return Err(TypedReceiveError::VersionMismatch {
                     expected,
                     received,
-                    type_name: std::any::type_name::<T>().to_string(),
+                    type_name: schema_name.to_string(),
                 });
             }
         }
@@ -120,13 +145,13 @@ fn check_schema_version<T>(
 ///
 /// Wraps a [`Publisher`] and serializes `T` via [`ZSerializer`](crate::ZSerializer)
 /// on each `put()`. Attempting to publish a wrong type is a compile error.
-pub struct TypedPublisher<'a, T: Serialize> {
+pub struct TypedPublisher<'a, T: Serialize + TypedSchema> {
     inner: Publisher<'a>,
     schema_version: Option<u32>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Serialize> TypedPublisher<'_, T> {
+impl<T: Serialize + TypedSchema> TypedPublisher<'_, T> {
     /// Publish a typed payload.
     pub async fn put(&self, payload: &T) -> ZResult<()> {
         let zbytes = z_serialize(payload);
@@ -155,13 +180,13 @@ impl<T: Serialize> TypedPublisher<'_, T> {
 ///
 /// The `Handler` type parameter defaults to [`FifoChannelHandler<Sample>`].
 /// Use [`TypedSubscriberBuilder::with`] to specify a custom handler.
-pub struct TypedSubscriber<T: Deserialize, Handler = FifoChannelHandler<Sample>> {
+pub struct TypedSubscriber<T: Deserialize + TypedSchema, Handler = FifoChannelHandler<Sample>> {
     inner: Subscriber<Handler>,
     schema_version: Option<u32>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Deserialize> TypedSubscriber<T, FifoChannelHandler<Sample>> {
+impl<T: Deserialize + TypedSchema> TypedSubscriber<T, FifoChannelHandler<Sample>> {
     /// Wait for an incoming typed message.
     ///
     /// The outer `ZResult` fails only if the channel is closed.
@@ -179,14 +204,14 @@ impl<T: Deserialize> TypedSubscriber<T, FifoChannelHandler<Sample>> {
     }
 }
 
-impl<T: Deserialize, Handler> TypedSubscriber<T, Handler> {
+impl<T: Deserialize + TypedSchema, Handler> TypedSubscriber<T, Handler> {
     fn deserialize_sample(&self, sample: &Sample) -> Result<T, TypedReceiveError> {
-        check_schema_version::<T>(sample, self.schema_version)?;
+        check_schema_version(sample, self.schema_version, T::SCHEMA_NAME)?;
         z_deserialize::<T>(sample.payload()).map_err(TypedReceiveError::from)
     }
 }
 
-impl<T: Deserialize, Handler> TypedSubscriber<T, Handler> {
+impl<T: Deserialize + TypedSchema, Handler> TypedSubscriber<T, Handler> {
     /// Returns the [`KeyExpr`] this subscriber is subscribed to.
     pub fn key_expr(&self) -> &KeyExpr<'static> {
         self.inner.key_expr()
@@ -199,14 +224,14 @@ impl<T: Deserialize, Handler> TypedSubscriber<T, Handler> {
 }
 
 /// Builder for [`TypedPublisher`].
-pub struct TypedPublisherBuilder<'a, 'b, T: Serialize> {
+pub struct TypedPublisherBuilder<'a, 'b, T: Serialize + TypedSchema> {
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
     schema_version: Option<u32>,
     _phantom: PhantomData<T>,
 }
 
-impl<'a, 'b, T: Serialize> TypedPublisherBuilder<'a, 'b, T> {
+impl<'a, 'b, T: Serialize + TypedSchema> TypedPublisherBuilder<'a, 'b, T> {
     /// Set the schema version for this publisher.
     ///
     /// When set, the version is attached to every publication as metadata.
@@ -219,8 +244,11 @@ impl<'a, 'b, T: Serialize> TypedPublisherBuilder<'a, 'b, T> {
 
     fn build(self) -> ZResult<TypedPublisher<'b, T>> {
         let key_expr = self.key_expr?;
-        let encoding =
-            Encoding::from(format!("zenoh-ext/typed:{}", std::any::type_name::<T>()));
+        debug_assert!(
+            !T::SCHEMA_NAME.is_empty(),
+            "TypedSchema::SCHEMA_NAME must not be empty"
+        );
+        let encoding = Encoding::from(format!("zenoh-ext/typed:{}", T::SCHEMA_NAME));
         let inner = self
             .session
             .declare_publisher(key_expr)
@@ -234,7 +262,7 @@ impl<'a, 'b, T: Serialize> TypedPublisherBuilder<'a, 'b, T> {
     }
 }
 
-impl<'b, T: Serialize> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
+impl<'b, T: Serialize + TypedSchema> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
     type Output = ZResult<TypedPublisher<'b, T>>;
     type IntoFuture = Ready<Self::Output>;
 
@@ -247,7 +275,7 @@ impl<'b, T: Serialize> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
 ///
 /// By default, uses [`FifoChannelHandler`] (the zenoh default handler).
 /// Use [`.with(handler)`](TypedSubscriberBuilder::with) to specify a custom handler.
-pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize, Handler = DefaultHandler> {
+pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize + TypedSchema, Handler = DefaultHandler> {
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
     handler: Handler,
@@ -255,7 +283,7 @@ pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize, Handler = DefaultHandl
     _phantom: PhantomData<T>,
 }
 
-impl<'a, 'b, T: Deserialize, Handler> TypedSubscriberBuilder<'a, 'b, T, Handler> {
+impl<'a, 'b, T: Deserialize + TypedSchema, Handler> TypedSubscriberBuilder<'a, 'b, T, Handler> {
     /// Set the expected schema version for this subscriber.
     ///
     /// When set, incoming messages with a mismatched version attachment
@@ -268,7 +296,7 @@ impl<'a, 'b, T: Deserialize, Handler> TypedSubscriberBuilder<'a, 'b, T, Handler>
     }
 }
 
-impl<'a, 'b, T: Deserialize> TypedSubscriberBuilder<'a, 'b, T, DefaultHandler> {
+impl<'a, 'b, T: Deserialize + TypedSchema> TypedSubscriberBuilder<'a, 'b, T, DefaultHandler> {
     /// Specify a custom handler for this subscriber.
     ///
     /// The handler must implement [`IntoHandler<Sample>`].
@@ -289,7 +317,7 @@ impl<'a, 'b, T: Deserialize> TypedSubscriberBuilder<'a, 'b, T, DefaultHandler> {
     }
 }
 
-impl<T: Deserialize, Handler> TypedSubscriberBuilder<'_, '_, T, Handler>
+impl<T: Deserialize + TypedSchema, Handler> TypedSubscriberBuilder<'_, '_, T, Handler>
 where
     Handler: zenoh::handlers::IntoHandler<Sample> + Send,
     Handler::Handler: Send,
@@ -309,7 +337,8 @@ where
     }
 }
 
-impl<T: Deserialize, Handler> IntoFuture for TypedSubscriberBuilder<'_, '_, T, Handler>
+impl<T: Deserialize + TypedSchema, Handler> IntoFuture
+    for TypedSubscriberBuilder<'_, '_, T, Handler>
 where
     Handler: zenoh::handlers::IntoHandler<Sample> + Send,
     Handler::Handler: Send,
@@ -323,6 +352,10 @@ where
 }
 
 // -- Typed Query/Reply --
+//
+// Note: TypedQuery/TypedQueryable do not require `TypedSchema` because
+// the queryable path does not set a typed encoding on the wire. Schema
+// identification for queries is deferred to the typed RPC layer (M7).
 
 /// A typed query received by a [`TypedQueryable`].
 ///
@@ -437,7 +470,7 @@ impl<Resp: Deserialize> std::future::IntoFuture for TypedGetFuture<Resp> {
 /// Extension trait for [`Session`] to declare typed publishers, subscribers, and queryables.
 pub trait TypedSessionExt {
     /// Declare a [`TypedPublisher`] for the given key expression.
-    fn declare_typed_publisher<'b, T: Serialize, TryIntoKeyExpr>(
+    fn declare_typed_publisher<'b, T: Serialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedPublisherBuilder<'_, 'b, T>
@@ -446,7 +479,7 @@ pub trait TypedSessionExt {
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>;
 
     /// Declare a [`TypedSubscriber`] for the given key expression.
-    fn declare_typed_subscriber<'b, T: Deserialize, TryIntoKeyExpr>(
+    fn declare_typed_subscriber<'b, T: Deserialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedSubscriberBuilder<'_, 'b, T>
@@ -478,7 +511,7 @@ pub trait TypedSessionExt {
 }
 
 impl TypedSessionExt for Session {
-    fn declare_typed_publisher<'b, T: Serialize, TryIntoKeyExpr>(
+    fn declare_typed_publisher<'b, T: Serialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedPublisherBuilder<'_, 'b, T>
@@ -494,7 +527,7 @@ impl TypedSessionExt for Session {
         }
     }
 
-    fn declare_typed_subscriber<'b, T: Deserialize, TryIntoKeyExpr>(
+    fn declare_typed_subscriber<'b, T: Deserialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedSubscriberBuilder<'_, 'b, T>
