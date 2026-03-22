@@ -552,7 +552,8 @@ impl EventSubscriber {
             Ok(handle) => Some(handle.spawn(async move {
                 loop {
                     tokio::time::sleep(flush_interval).await;
-                    if let Err(e) = Self::do_flush_async(&flush_state).await {
+                    // best_effort = true: auto-flush logs and swallows persist errors
+                    if let Err(e) = Self::do_flush_async(&flush_state, false).await {
                         warn!("EventSubscriber auto-flush failed: {e}");
                     }
                 }
@@ -596,11 +597,19 @@ impl EventSubscriber {
     }
 
     /// Manually flush the cursor to persistent storage.
+    ///
+    /// Returns an error if the persistence backend fails. Use this when you
+    /// need confirmation that the cursor was durably written.
     pub async fn flush_cursor(&self) -> ZResult<()> {
-        Self::do_flush_async(&self.state).await
+        Self::do_flush_async(&self.state, true).await
     }
 
-    async fn do_flush_async(state: &Arc<Mutex<EventSubscriberState>>) -> ZResult<()> {
+    /// `best_effort = false` propagates persist errors to the caller.
+    /// `best_effort = true` logs and swallows errors (used by auto-flush).
+    async fn do_flush_async(
+        state: &Arc<Mutex<EventSubscriberState>>,
+        propagate_error: bool,
+    ) -> ZResult<()> {
         // Extract data needed for persist under the lock, then drop before await
         let (zbytes, persistence_key, current, session, persister) = {
             let lock = zlock!(state);
@@ -619,11 +628,13 @@ impl EventSubscriber {
             // lock dropped here
         };
 
-        // Session may be closed during shutdown — treat as success
         match persister.persist(&session, &persistence_key, zbytes).await {
             Ok(()) => {}
             Err(e) => {
-                tracing::debug!("EventSubscriber flush skipped (session closed?): {e}");
+                if propagate_error {
+                    return Err(e);
+                }
+                warn!("EventSubscriber auto-flush persist failed: {e}");
                 return Ok(());
             }
         }
