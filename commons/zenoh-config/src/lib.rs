@@ -878,6 +878,8 @@ validated_struct::validator! {
 
         /// Maximum number of transport connections allowed.
         /// When set, new connections beyond this limit will be rejected.
+        ///
+        /// **Unstable** — this field may change or be removed before stabilization.
         pub max_connections: Option<usize>,
 
         /// Configuration of the downsampling.
