@@ -20,11 +20,13 @@ use async_trait::async_trait;
 use zenoh::bytes::ZBytes;
 use zenoh::internal::runtime::ZRuntime;
 use zenoh::key_expr::KeyExpr;
+use zenoh::liveliness::LivelinessToken;
 use zenoh::query::{Query, Queryable};
 use zenoh::session::Session;
 use zenoh::Wait;
 
 use super::deadline::DeadlineContext;
+use super::discovery::service_liveliness_token_key;
 use super::error::{ServiceError, StatusCode};
 use crate::{z_deserialize, z_serialize};
 
@@ -70,9 +72,15 @@ where
 /// The server dispatches incoming queries to registered [`MethodHandler`]s
 /// based on the `rpc:method` attachment on each query. Construct one via
 /// [`ServiceServer::builder`].
+///
+/// The server declares a liveliness token on construction, enabling remote
+/// discovery via [`ServiceClient::is_available`] and
+/// [`ServiceClient::instance_count`]. The token is automatically undeclared
+/// when the server is dropped.
 #[zenoh_macros::unstable]
 pub struct ServiceServer {
     _queryable: Queryable<()>,
+    _token: LivelinessToken,
 }
 
 /// Builder for [`ServiceServer`].
@@ -163,8 +171,21 @@ impl<'a, 'b> ServiceServerBuilder<'a, 'b> {
             })
             .wait()?;
 
+        // Declare a liveliness token for service discovery.
+        // The token key encodes the service key expression hash and this
+        // session's zenoh ID so that remote clients can discover all instances
+        // of a given service.
+        let token_key =
+            service_liveliness_token_key(key_expr.as_str(), &self.session.zid().to_string());
+        let token = self
+            .session
+            .liveliness()
+            .declare_token(&token_key)
+            .wait()?;
+
         Ok(ServiceServer {
             _queryable: queryable,
+            _token: token,
         })
     }
 }

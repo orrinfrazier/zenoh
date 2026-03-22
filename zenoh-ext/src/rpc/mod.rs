@@ -14,6 +14,7 @@
 
 mod client;
 mod deadline;
+mod discovery;
 mod error;
 mod server;
 
