@@ -32,10 +32,14 @@
 //! - `default`: Core RPC functionality
 //! - `unstable`: Gated experimental APIs
 
+mod client;
 mod deadline;
 mod discovery;
 mod error;
+mod server;
 
+pub use client::ServiceClient;
 pub use deadline::{deadline_attachment, DeadlineContext, DEADLINE_ATTACHMENT_KEY};
 pub use discovery::{fnv1a_hash, service_liveliness_prefix, service_liveliness_token_key};
 pub use error::{ServiceError, StatusCode};
+pub use server::{MethodHandler, ServiceServer, ServiceServerBuilder, METHOD_ATTACHMENT_KEY};
