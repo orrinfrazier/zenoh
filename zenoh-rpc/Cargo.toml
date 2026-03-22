@@ -32,7 +32,6 @@ unstable = ["zenoh/internal", "zenoh/unstable"]
 
 [dependencies]
 async-trait = { workspace = true }
-serde = { workspace = true, features = ["default"] }
 tokio = { workspace = true, features = [
   "macros",
   "rt",

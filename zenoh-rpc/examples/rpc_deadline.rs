@@ -97,11 +97,7 @@ async fn main() {
     // Small sleep to ensure the query has time to expire in transit
     tokio::time::sleep(Duration::from_millis(20)).await;
     match client
-        .call::<String, u64>(
-            "slow_work",
-            &String::new(),
-            Some(Duration::from_millis(10)),
-        )
+        .call::<String, u64>("slow_work", &String::new(), Some(Duration::from_millis(10)))
         .await
     {
         Ok(remaining_ms) => {
@@ -120,11 +116,7 @@ async fn main() {
     // --- Call 3: demonstrate reading the budget in the handler ---
     println!("\n--- call(\"slow_work\") with 2 s explicit timeout ---");
     match client
-        .call::<String, u64>(
-            "slow_work",
-            &String::new(),
-            Some(Duration::from_secs(2)),
-        )
+        .call::<String, u64>("slow_work", &String::new(), Some(Duration::from_secs(2)))
         .await
     {
         Ok(remaining_ms) => {

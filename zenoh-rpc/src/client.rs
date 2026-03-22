@@ -134,9 +134,12 @@ impl ServiceClient {
             })?;
 
         // Get the first reply
-        let reply = replies.recv_async().await.map_err(|e| ServiceError::Internal {
-            message: format!("failed to receive reply: {e}"),
-        })?;
+        let reply = replies
+            .recv_async()
+            .await
+            .map_err(|e| ServiceError::Internal {
+                message: format!("failed to receive reply: {e}"),
+            })?;
 
         // Check if success or error reply.
         match reply.into_result() {

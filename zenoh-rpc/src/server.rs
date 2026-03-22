@@ -225,10 +225,8 @@ fn extract_method(query: &Query) -> Option<String> {
 
 /// Build a status-code attachment as serialized `HashMap<String, String>`.
 fn status_attachment(code: StatusCode) -> ZBytes {
-    let map: HashMap<String, String> = HashMap::from([(
-        STATUS_ATTACHMENT_KEY.to_string(),
-        (code as u8).to_string(),
-    )]);
+    let map: HashMap<String, String> =
+        HashMap::from([(STATUS_ATTACHMENT_KEY.to_string(), (code as u8).to_string())]);
     z_serialize(&map)
 }
 

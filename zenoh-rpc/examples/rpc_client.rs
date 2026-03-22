@@ -40,8 +40,8 @@ async fn main() {
     println!("Opening session...");
     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
 
-    let client = ServiceClient::new(&session, SERVICE_KEY, TIMEOUT)
-        .expect("failed to create ServiceClient");
+    let client =
+        ServiceClient::new(&session, SERVICE_KEY, TIMEOUT).expect("failed to create ServiceClient");
 
     // --- Typed call: greet ---
     println!("\n--- call(\"greet\", \"Alice\") ---");
@@ -55,10 +55,7 @@ async fn main() {
 
     // --- Typed call: add ---
     println!("\n--- call(\"add\", (17, 25)) ---");
-    match client
-        .call::<(i64, i64), i64>("add", &(17, 25), None)
-        .await
-    {
+    match client.call::<(i64, i64), i64>("add", &(17, 25), None).await {
         Ok(sum) => println!("  Response: {sum}"),
         Err(e) => eprintln!("  Error: {e}"),
     }

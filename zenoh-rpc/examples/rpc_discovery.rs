@@ -47,7 +47,10 @@ async fn main() {
     // --- Step 1: No servers running ---
     println!("\n--- Before starting any server ---");
     let available = client.is_available().await.expect("is_available failed");
-    let count = client.instance_count().await.expect("instance_count failed");
+    let count = client
+        .instance_count()
+        .await
+        .expect("instance_count failed");
     println!("  is_available: {available}");
     println!("  instance_count: {count}");
 
@@ -64,7 +67,10 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let available = client.is_available().await.expect("is_available failed");
-    let count = client.instance_count().await.expect("instance_count failed");
+    let count = client
+        .instance_count()
+        .await
+        .expect("instance_count failed");
     println!("  is_available: {available}");
     println!("  instance_count: {count}");
 
@@ -80,7 +86,10 @@ async fn main() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let count = client.instance_count().await.expect("instance_count failed");
+    let count = client
+        .instance_count()
+        .await
+        .expect("instance_count failed");
     println!("  instance_count: {count}");
 
     // --- Step 4: Drop server #1, count should decrease ---
@@ -88,7 +97,10 @@ async fn main() {
     drop(server1);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let count = client.instance_count().await.expect("instance_count failed");
+    let count = client
+        .instance_count()
+        .await
+        .expect("instance_count failed");
     println!("  instance_count: {count}");
 
     // --- Cleanup ---

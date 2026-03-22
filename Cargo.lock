@@ -6494,7 +6494,6 @@ name = "zenoh-rpc"
 version = "1.8.0"
 dependencies = [
  "async-trait",
- "serde",
  "tokio",
  "tracing",
  "zenoh",
