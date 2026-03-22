@@ -36,12 +36,93 @@ use zenoh::{
 
 use crate::{z_deserialize, z_serialize, Deserialize, Serialize, ZDeserializeError};
 
+/// Error type for typed receive operations that include version checking.
+#[derive(Debug)]
+pub enum TypedReceiveError {
+    /// The publisher's schema version doesn't match the subscriber's expected version.
+    VersionMismatch {
+        expected: u32,
+        received: u32,
+        type_name: String,
+    },
+    /// The payload could not be deserialized into the expected type.
+    DeserializationFailed(ZDeserializeError),
+}
+
+impl std::fmt::Display for TypedReceiveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VersionMismatch {
+                expected,
+                received,
+                type_name,
+            } => write!(
+                f,
+                "schema version mismatch for {type_name}: expected {expected}, received {received}"
+            ),
+            Self::DeserializationFailed(e) => write!(f, "deserialization failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TypedReceiveError {}
+
+impl From<ZDeserializeError> for TypedReceiveError {
+    fn from(e: ZDeserializeError) -> Self {
+        Self::DeserializationFailed(e)
+    }
+}
+
+/// Encode a schema version into a ZBytes attachment value.
+fn encode_schema_version(version: u32) -> ZBytes {
+    ZBytes::from(version.to_le_bytes().to_vec())
+}
+
+/// Decode a schema version from a ZBytes attachment value.
+fn decode_schema_version(zbytes: &ZBytes) -> Option<u32> {
+    let bytes = zbytes.to_bytes();
+    if bytes.len() == 4 {
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    } else {
+        None
+    }
+}
+
+/// Check if a sample's attachment carries a matching schema version.
+/// Returns Ok(()) if version matches or no version checking is configured.
+/// Returns Err(TypedReceiveError::VersionMismatch) on mismatch.
+fn check_schema_version<T>(
+    sample: &Sample,
+    expected_version: Option<u32>,
+) -> Result<(), TypedReceiveError> {
+    let expected = match expected_version {
+        Some(v) => v,
+        None => return Ok(()), // No version checking configured
+    };
+
+    // Check if sample has a version attachment
+    if let Some(attachment) = sample.attachment() {
+        if let Some(received) = decode_schema_version(attachment) {
+            if received != expected {
+                return Err(TypedReceiveError::VersionMismatch {
+                    expected,
+                    received,
+                    type_name: std::any::type_name::<T>().to_string(),
+                });
+            }
+        }
+    }
+    // No attachment = no version check (backward compatible)
+    Ok(())
+}
+
 /// A publisher that only accepts payloads of type `T`.
 ///
 /// Wraps a [`Publisher`] and serializes `T` via [`ZSerializer`](crate::ZSerializer)
 /// on each `put()`. Attempting to publish a wrong type is a compile error.
 pub struct TypedPublisher<'a, T: Serialize> {
     inner: Publisher<'a>,
+    schema_version: Option<u32>,
     _phantom: PhantomData<T>,
 }
 
@@ -49,7 +130,11 @@ impl<T: Serialize> TypedPublisher<'_, T> {
     /// Publish a typed payload.
     pub async fn put(&self, payload: &T) -> ZResult<()> {
         let zbytes = z_serialize(payload);
-        self.inner.put(zbytes).await
+        let mut builder = self.inner.put(zbytes);
+        if let Some(version) = self.schema_version {
+            builder = builder.attachment(encode_schema_version(version));
+        }
+        builder.await
     }
 
     /// Returns the [`KeyExpr`] this publisher publishes to.
@@ -72,6 +157,7 @@ impl<T: Serialize> TypedPublisher<'_, T> {
 /// Use [`TypedSubscriberBuilder::with`] to specify a custom handler.
 pub struct TypedSubscriber<T: Deserialize, Handler = FifoChannelHandler<Sample>> {
     inner: Subscriber<Handler>,
+    schema_version: Option<u32>,
     _phantom: PhantomData<T>,
 }
 
@@ -79,16 +165,24 @@ impl<T: Deserialize> TypedSubscriber<T, FifoChannelHandler<Sample>> {
     /// Wait for an incoming typed message.
     ///
     /// The outer `ZResult` fails only if the channel is closed.
-    /// The inner `Result` indicates deserialization success/failure.
-    pub async fn recv_async(&self) -> ZResult<Result<T, ZDeserializeError>> {
+    /// The inner `Result` indicates deserialization success/failure,
+    /// or a version mismatch if schema versioning is configured.
+    pub async fn recv_async(&self) -> ZResult<Result<T, TypedReceiveError>> {
         let sample = self.inner.recv_async().await?;
-        Ok(z_deserialize::<T>(sample.payload()))
+        Ok(self.deserialize_sample(&sample))
     }
 
     /// Blocking receive for an incoming typed message.
-    pub fn recv(&self) -> ZResult<Result<T, ZDeserializeError>> {
+    pub fn recv(&self) -> ZResult<Result<T, TypedReceiveError>> {
         let sample = self.inner.recv()?;
-        Ok(z_deserialize::<T>(sample.payload()))
+        Ok(self.deserialize_sample(&sample))
+    }
+}
+
+impl<T: Deserialize, Handler> TypedSubscriber<T, Handler> {
+    fn deserialize_sample(&self, sample: &Sample) -> Result<T, TypedReceiveError> {
+        check_schema_version::<T>(sample, self.schema_version)?;
+        z_deserialize::<T>(sample.payload()).map_err(TypedReceiveError::from)
     }
 }
 
@@ -108,10 +202,21 @@ impl<T: Deserialize, Handler> TypedSubscriber<T, Handler> {
 pub struct TypedPublisherBuilder<'a, 'b, T: Serialize> {
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
+    schema_version: Option<u32>,
     _phantom: PhantomData<T>,
 }
 
-impl<'b, T: Serialize> TypedPublisherBuilder<'_, 'b, T> {
+impl<'a, 'b, T: Serialize> TypedPublisherBuilder<'a, 'b, T> {
+    /// Set the schema version for this publisher.
+    ///
+    /// When set, the version is attached to every publication as metadata.
+    /// Subscribers with a matching expected version will accept the message;
+    /// subscribers expecting a different version will reject it.
+    pub fn schema_version(mut self, version: u32) -> Self {
+        self.schema_version = Some(version);
+        self
+    }
+
     fn build(self) -> ZResult<TypedPublisher<'b, T>> {
         let key_expr = self.key_expr?;
         let encoding =
@@ -123,6 +228,7 @@ impl<'b, T: Serialize> TypedPublisherBuilder<'_, 'b, T> {
             .wait()?;
         Ok(TypedPublisher {
             inner,
+            schema_version: self.schema_version,
             _phantom: PhantomData,
         })
     }
@@ -145,21 +251,39 @@ pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize, Handler = DefaultHandl
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
     handler: Handler,
+    schema_version: Option<u32>,
     _phantom: PhantomData<T>,
+}
+
+impl<'a, 'b, T: Deserialize, Handler> TypedSubscriberBuilder<'a, 'b, T, Handler> {
+    /// Set the expected schema version for this subscriber.
+    ///
+    /// When set, incoming messages with a mismatched version attachment
+    /// will yield [`TypedReceiveError::VersionMismatch`] without attempting
+    /// deserialization. Messages without a version attachment are accepted
+    /// (backward compatible).
+    pub fn schema_version(mut self, version: u32) -> Self {
+        self.schema_version = Some(version);
+        self
+    }
 }
 
 impl<'a, 'b, T: Deserialize> TypedSubscriberBuilder<'a, 'b, T, DefaultHandler> {
     /// Specify a custom handler for this subscriber.
     ///
     /// The handler must implement [`IntoHandler<Sample>`].
-    pub fn with<Handler>(self, handler: Handler) -> TypedSubscriberBuilder<'a, 'b, T, Handler>
+    pub fn with<NewHandler>(
+        self,
+        handler: NewHandler,
+    ) -> TypedSubscriberBuilder<'a, 'b, T, NewHandler>
     where
-        Handler: zenoh::handlers::IntoHandler<Sample>,
+        NewHandler: zenoh::handlers::IntoHandler<Sample>,
     {
         TypedSubscriberBuilder {
             session: self.session,
             key_expr: self.key_expr,
             handler,
+            schema_version: self.schema_version,
             _phantom: PhantomData,
         }
     }
@@ -179,6 +303,7 @@ where
             .wait()?;
         Ok(TypedSubscriber {
             inner,
+            schema_version: self.schema_version,
             _phantom: PhantomData,
         })
     }
@@ -364,6 +489,7 @@ impl TypedSessionExt for Session {
         TypedPublisherBuilder {
             session: self,
             key_expr: key_expr.try_into().map_err(Into::into),
+            schema_version: None,
             _phantom: PhantomData,
         }
     }
@@ -380,6 +506,7 @@ impl TypedSessionExt for Session {
             session: self,
             key_expr: key_expr.try_into().map_err(Into::into),
             handler: DefaultHandler::default(),
+            schema_version: None,
             _phantom: PhantomData,
         }
     }

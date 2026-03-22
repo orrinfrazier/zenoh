@@ -328,3 +328,124 @@ async fn typed_queryable_malformed_request_yields_err() {
     drop(replies);
     handle.await.unwrap();
 }
+
+// -- SchemaVersion tests --
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_pub_sub_with_schema_version_match() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    let subscriber = session
+        .declare_typed_subscriber::<TelemetryPayload, _>("test/typed/version/match")
+        .schema_version(3)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/version/match")
+        .schema_version(3)
+        .await
+        .unwrap();
+
+    let payload = TelemetryPayload {
+        device_id: 1,
+        temperature: 20.0,
+        label: "versioned".to_string(),
+    };
+    publisher.put(&payload).await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    // Version matches — should get Ok
+    assert!(received.is_ok());
+    assert_eq!(received.unwrap(), payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_pub_sub_version_mismatch_yields_err() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    let subscriber = session
+        .declare_typed_subscriber::<TelemetryPayload, _>("test/typed/version/mismatch")
+        .schema_version(3)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let publisher = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/version/mismatch")
+        .schema_version(2) // Different version!
+        .await
+        .unwrap();
+
+    let payload = TelemetryPayload {
+        device_id: 1,
+        temperature: 20.0,
+        label: "wrong-version".to_string(),
+    };
+    publisher.put(&payload).await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    // Version mismatch — should get Err with VersionMismatch
+    assert!(received.is_err());
+    let err = received.unwrap_err();
+    match err {
+        zenoh_ext::TypedReceiveError::VersionMismatch { expected, received, .. } => {
+            assert_eq!(expected, 3);
+            assert_eq!(received, 2);
+        }
+        other => panic!("Expected VersionMismatch, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_sub_no_version_attachment_degrades_gracefully() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    // Subscriber expects version 3
+    let subscriber = session
+        .declare_typed_subscriber::<TelemetryPayload, _>("test/typed/version/noattach")
+        .schema_version(3)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Publisher WITHOUT schema_version (no version attachment)
+    let publisher = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/version/noattach")
+        .await
+        .unwrap();
+
+    let payload = TelemetryPayload {
+        device_id: 5,
+        temperature: 15.0,
+        label: "no-version".to_string(),
+    };
+    publisher.put(&payload).await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(5), subscriber.recv_async())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    // No version attachment — should attempt deserialization and succeed
+    assert!(received.is_ok());
+    assert_eq!(received.unwrap(), payload);
+}
