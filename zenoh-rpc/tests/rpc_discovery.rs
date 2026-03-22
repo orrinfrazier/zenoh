@@ -22,9 +22,7 @@ use zenoh_rpc::{ServiceClient, ServiceServer};
 /// the given endpoint.
 async fn listening_session(endpoint: &str) -> zenoh::Session {
     let mut config = zenoh::Config::default();
-    config
-        .insert_json5("mode", "\"peer\"")
-        .unwrap();
+    config.insert_json5("mode", "\"peer\"").unwrap();
     config
         .insert_json5("listen/endpoints", &format!("[\"{endpoint}\"]"))
         .unwrap();
@@ -38,9 +36,7 @@ async fn listening_session(endpoint: &str) -> zenoh::Session {
 /// the given endpoint.
 async fn connecting_session(endpoint: &str) -> zenoh::Session {
     let mut config = zenoh::Config::default();
-    config
-        .insert_json5("mode", "\"peer\"")
-        .unwrap();
+    config.insert_json5("mode", "\"peer\"").unwrap();
     config
         .insert_json5("connect/endpoints", &format!("[\"{endpoint}\"]"))
         .unwrap();
@@ -85,7 +81,10 @@ async fn server_is_available_after_start() {
     let client =
         ServiceClient::new(&session2, &ke, Duration::from_secs(5)).expect("client should build");
 
-    let available = client.is_available().await.expect("is_available should work");
+    let available = client
+        .is_available()
+        .await
+        .expect("is_available should work");
     assert!(available, "server should be available");
 
     session1.close().await.unwrap();
@@ -111,7 +110,10 @@ async fn no_server_is_not_available() {
     let client =
         ServiceClient::new(&session2, &ke, Duration::from_secs(5)).expect("client should build");
 
-    let available = client.is_available().await.expect("is_available should work");
+    let available = client
+        .is_available()
+        .await
+        .expect("is_available should work");
     assert!(!available, "no server should mean not available");
 
     session1.close().await.unwrap();

@@ -123,9 +123,7 @@ impl Deserialize for AddResponse {
 /// scouting disabled.
 async fn listening_session(endpoint: &str) -> zenoh::Session {
     let mut config = zenoh::Config::default();
-    config
-        .insert_json5("mode", "\"peer\"")
-        .unwrap();
+    config.insert_json5("mode", "\"peer\"").unwrap();
     config
         .insert_json5("listen/endpoints", &format!("[\"{endpoint}\"]"))
         .unwrap();
@@ -139,9 +137,7 @@ async fn listening_session(endpoint: &str) -> zenoh::Session {
 /// scouting disabled.
 async fn connecting_session(endpoint: &str) -> zenoh::Session {
     let mut config = zenoh::Config::default();
-    config
-        .insert_json5("mode", "\"peer\"")
-        .unwrap();
+    config.insert_json5("mode", "\"peer\"").unwrap();
     config
         .insert_json5("connect/endpoints", &format!("[\"{endpoint}\"]"))
         .unwrap();
@@ -255,16 +251,15 @@ async fn structured_error_not_found() {
     let server_session = listening_session(ENDPOINT).await;
     let client_session = connecting_session(ENDPOINT).await;
 
-    let _server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str()).method_fn(
-        "find_user",
-        |_query| {
+    let _server = ztimeout!(
+        ServiceServer::builder(&server_session, ke.as_str()).method_fn("find_user", |_query| {
             Box::pin(async {
                 Err(ServiceError::NotFound {
                     message: "user not found".to_string(),
                 })
             })
-        },
-    ))
+        },)
+    )
     .expect("server should start");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -272,9 +267,7 @@ async fn structured_error_not_found() {
     let client = ServiceClient::new(&client_session, &ke, Duration::from_secs(5))
         .expect("client should build");
 
-    let result = client
-        .call_raw("find_user", ZBytes::default(), None)
-        .await;
+    let result = client.call_raw("find_user", ZBytes::default(), None).await;
 
     match result {
         Err(ServiceError::NotFound { message }) => {
@@ -301,10 +294,10 @@ async fn method_not_found() {
     let server_session = listening_session(ENDPOINT).await;
     let client_session = connecting_session(ENDPOINT).await;
 
-    let _server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str()).method_fn(
-        "exists",
-        |_query| { Box::pin(async { Ok(ZBytes::default()) }) },
-    ))
+    let _server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str())
+        .method_fn("exists", |_query| {
+            Box::pin(async { Ok(ZBytes::default()) })
+        },))
     .expect("server should start");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -341,9 +334,8 @@ async fn invalid_request_no_poison() {
     let server_session = listening_session(ENDPOINT).await;
     let client_session = connecting_session(ENDPOINT).await;
 
-    let _server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str()).method_fn(
-        "greet",
-        |query| {
+    let _server = ztimeout!(
+        ServiceServer::builder(&server_session, ke.as_str()).method_fn("greet", |query| {
             Box::pin(async move {
                 let req: GreetRequest = query
                     .payload()
@@ -360,8 +352,8 @@ async fn invalid_request_no_poison() {
                 };
                 Ok(z_serialize(&resp))
             })
-        },
-    ))
+        },)
+    )
     .expect("server should start");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -414,9 +406,8 @@ async fn deadline_exceeded() {
     let server_session = listening_session(ENDPOINT).await;
     let client_session = connecting_session(ENDPOINT).await;
 
-    let _server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str()).method_fn(
-        "slow",
-        |_query| {
+    let _server = ztimeout!(
+        ServiceServer::builder(&server_session, ke.as_str()).method_fn("slow", |_query| {
             Box::pin(async {
                 // Sleep for 2 seconds — longer than the client timeout
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -425,8 +416,8 @@ async fn deadline_exceeded() {
                 };
                 Ok(z_serialize(&resp))
             })
-        },
-    ))
+        },)
+    )
     .expect("server should start");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -436,11 +427,7 @@ async fn deadline_exceeded() {
 
     // Call with 500ms timeout — server sleeps 2s, so this should fail
     let result = client
-        .call_raw(
-            "slow",
-            ZBytes::default(),
-            Some(Duration::from_millis(500)),
-        )
+        .call_raw("slow", ZBytes::default(), Some(Duration::from_millis(500)))
         .await;
 
     // The client timeout fires at 500ms. The server handler sleeps for 2s.
@@ -484,17 +471,16 @@ async fn discovery_available_then_unavailable() {
     );
 
     // Start the server
-    let server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str()).method_fn(
-        "ping",
-        |_query| { Box::pin(async { Ok(ZBytes::from(b"pong".as_ref())) }) },
-    ))
+    let server = ztimeout!(ServiceServer::builder(&server_session, ke.as_str())
+        .method_fn("ping", |_query| {
+            Box::pin(async { Ok(ZBytes::from(b"pong".as_ref())) })
+        },))
     .expect("server should start");
 
     // Allow liveliness token to propagate
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let available_after_start =
-        ztimeout!(client.is_available()).expect("is_available should work");
+    let available_after_start = ztimeout!(client.is_available()).expect("is_available should work");
     assert!(
         available_after_start,
         "service should be available after server starts"
@@ -504,8 +490,7 @@ async fn discovery_available_then_unavailable() {
     drop(server);
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let available_after_drop =
-        ztimeout!(client.is_available()).expect("is_available should work");
+    let available_after_drop = ztimeout!(client.is_available()).expect("is_available should work");
     assert!(
         !available_after_drop,
         "service should NOT be available after server is dropped"
