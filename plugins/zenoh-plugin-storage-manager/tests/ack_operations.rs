@@ -15,11 +15,7 @@
 use std::thread::sleep;
 
 use tokio::runtime::Runtime;
-use zenoh::{
-    internal::zasync_executor_init,
-    query::Reply,
-    Config,
-};
+use zenoh::{internal::zasync_executor_init, query::Reply, Config};
 use zenoh_backend_traits::StorageInsertionResult;
 use zenoh_plugin_trait::Plugin;
 
