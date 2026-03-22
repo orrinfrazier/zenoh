@@ -60,9 +60,11 @@ pub trait TypedSchema {
     const SCHEMA_NAME: &'static str;
 }
 
-/// Error type for typed receive operations that include version checking.
+/// Error type for typed receive operations that include encoding and version checking.
 #[derive(Debug)]
 pub enum TypedReceiveError {
+    /// The sample's encoding doesn't match the expected `zenoh-ext/typed:{SCHEMA_NAME}`.
+    EncodingMismatch { expected: String, received: String },
     /// The publisher's schema version doesn't match the subscriber's expected version.
     VersionMismatch {
         expected: u32,
@@ -76,6 +78,10 @@ pub enum TypedReceiveError {
 impl std::fmt::Display for TypedReceiveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::EncodingMismatch { expected, received } => write!(
+                f,
+                "encoding mismatch: expected {expected}, received {received}"
+            ),
             Self::VersionMismatch {
                 expected,
                 received,
@@ -138,6 +144,21 @@ fn check_schema_version(
         }
     }
     // No attachment = no version check (backward compatible)
+    Ok(())
+}
+
+/// Check that a sample's encoding matches the expected typed encoding.
+/// Returns `Ok(())` if the encoding matches `zenoh-ext/typed:{schema_name}`.
+/// Returns `Err(TypedReceiveError::EncodingMismatch)` if it does not match.
+fn check_encoding(sample: &Sample, schema_name: &str) -> Result<(), TypedReceiveError> {
+    let expected = Encoding::from(format!("zenoh-ext/typed:{}", schema_name));
+    let received = sample.encoding();
+    if *received != expected {
+        return Err(TypedReceiveError::EncodingMismatch {
+            expected: expected.to_string(),
+            received: received.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -206,6 +227,7 @@ impl<T: Deserialize + TypedSchema> TypedSubscriber<T, FifoChannelHandler<Sample>
 
 impl<T: Deserialize + TypedSchema, Handler> TypedSubscriber<T, Handler> {
     fn deserialize_sample(&self, sample: &Sample) -> Result<T, TypedReceiveError> {
+        check_encoding(sample, T::SCHEMA_NAME)?;
         check_schema_version(sample, self.schema_version, T::SCHEMA_NAME)?;
         z_deserialize::<T>(sample.payload()).map_err(TypedReceiveError::from)
     }
@@ -586,5 +608,114 @@ impl TypedSessionExt for Session {
             Ok(replies)
         })();
         TypedGetFuture { result }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zenoh::key_expr::KeyExpr;
+    use zenoh::sample::SampleBuilder;
+
+    fn make_sample_with_encoding(encoding: &str) -> Sample {
+        let payload = z_serialize(&42u32);
+        let key: KeyExpr<'static> = KeyExpr::try_from("test/key").unwrap();
+        SampleBuilder::put(key, payload)
+            .encoding(Encoding::from(encoding))
+            .into()
+    }
+
+    fn make_sample_default_encoding() -> Sample {
+        let payload = z_serialize(&42u32);
+        let key: KeyExpr<'static> = KeyExpr::try_from("test/key").unwrap();
+        SampleBuilder::put(key, payload).into()
+    }
+
+    #[test]
+    fn check_encoding_accepts_correct_typed_encoding() {
+        let sample = make_sample_with_encoding("zenoh-ext/typed:test-payload");
+        assert!(check_encoding(&sample, "test-payload").is_ok());
+    }
+
+    #[test]
+    fn check_encoding_rejects_wrong_typed_encoding() {
+        let sample = make_sample_with_encoding("zenoh-ext/typed:other-type");
+        let result = check_encoding(&sample, "test-payload");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TypedReceiveError::EncodingMismatch { expected, received } => {
+                assert!(
+                    expected.contains("test-payload"),
+                    "expected should contain schema name, got: {expected}"
+                );
+                assert!(
+                    received.contains("other-type"),
+                    "received should contain actual schema name, got: {received}"
+                );
+            }
+            other => panic!("expected EncodingMismatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_encoding_rejects_untyped_encoding() {
+        let sample = make_sample_with_encoding("application/json");
+        let result = check_encoding(&sample, "test-payload");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TypedReceiveError::EncodingMismatch { expected, received } => {
+                assert!(
+                    expected.contains("test-payload"),
+                    "expected should reference schema name, got: {expected}"
+                );
+                assert!(
+                    received.contains("application/json"),
+                    "received should show actual encoding, got: {received}"
+                );
+            }
+            other => panic!("expected EncodingMismatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_encoding_rejects_default_encoding() {
+        let sample = make_sample_default_encoding();
+        let result = check_encoding(&sample, "test-payload");
+        assert!(
+            result.is_err(),
+            "default encoding should not pass typed encoding check"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                TypedReceiveError::EncodingMismatch { .. }
+            ),
+            "should be EncodingMismatch variant"
+        );
+    }
+
+    #[test]
+    fn encoding_mismatch_display_distinguishes_from_deserialization_error() {
+        let encoding_err = TypedReceiveError::EncodingMismatch {
+            expected: "zenoh-ext/typed:foo".to_string(),
+            received: "application/json".to_string(),
+        };
+        let deser_err = TypedReceiveError::DeserializationFailed(ZDeserializeError);
+
+        let encoding_msg = encoding_err.to_string();
+        let deser_msg = deser_err.to_string();
+
+        assert!(
+            encoding_msg.contains("encoding mismatch"),
+            "encoding error should say 'encoding mismatch', got: {encoding_msg}"
+        );
+        assert!(
+            deser_msg.contains("deserialization"),
+            "deser error should mention 'deserialization', got: {deser_msg}"
+        );
+        assert_ne!(
+            encoding_msg, deser_msg,
+            "error messages should be distinguishable"
+        );
     }
 }
