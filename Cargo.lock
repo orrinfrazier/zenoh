@@ -6500,6 +6500,7 @@ dependencies = [
  "zenoh",
  "zenoh-config",
  "zenoh-ext",
+ "zenoh-util",
 ]
 
 [[package]]

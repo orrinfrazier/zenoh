@@ -46,6 +46,7 @@ zenoh-ext = { workspace = true, default-features = false }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 zenoh-config = { workspace = true }
+zenoh-util = { workspace = true }
 
 [package.metadata.docs.rs]
 features = ["unstable"]
