@@ -20,6 +20,7 @@ use zenoh::key_expr::KeyExpr;
 use zenoh::session::Session;
 
 use super::deadline::deadline_attachment;
+use super::discovery::service_liveliness_prefix;
 use super::error::{ServiceError, StatusCode};
 use super::server::{METHOD_ATTACHMENT_KEY, STATUS_ATTACHMENT_KEY};
 use crate::{z_deserialize, z_serialize};
@@ -141,7 +142,7 @@ impl ServiceClient {
             }
         })?;
 
-        // Check if success or error reply
+        // Check if success or error reply.
         match reply.into_result() {
             Ok(sample) => {
                 // Check status code attachment if present
@@ -172,5 +173,49 @@ impl ServiceClient {
                 Err(err)
             }
         }
+    }
+
+    /// Check if at least one instance of this service is currently available.
+    ///
+    /// Queries liveliness tokens declared by [`ServiceServer`](super::ServiceServer)
+    /// instances matching this client's key expression.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let available = client.is_available().await?;
+    /// if available {
+    ///     let response: String = client.call("method", &request, None).await?;
+    /// }
+    /// ```
+    pub async fn is_available(&self) -> zenoh::Result<bool> {
+        let count = self.instance_count().await?;
+        Ok(count > 0)
+    }
+
+    /// Get the count of available service instances.
+    ///
+    /// Queries liveliness tokens declared by [`ServiceServer`](super::ServiceServer)
+    /// instances matching this client's key expression. Each server declares a
+    /// unique token keyed by its zenoh session ID, so the count reflects the
+    /// number of distinct server instances.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let count = client.instance_count().await?;
+    /// println!("{count} service instance(s) available");
+    /// ```
+    pub async fn instance_count(&self) -> zenoh::Result<usize> {
+        let prefix = service_liveliness_prefix(self.key_expr.as_str());
+        let replies = self.session.liveliness().get(&prefix).await?;
+
+        let mut count = 0;
+        while let Ok(reply) = replies.recv_async().await {
+            if reply.result().is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
