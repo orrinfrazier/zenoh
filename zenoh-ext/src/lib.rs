@@ -67,7 +67,8 @@ pub use crate::serialization::{
 };
 pub use crate::typed::{
     TypedGetFuture, TypedPublisher, TypedPublisherBuilder, TypedQuery, TypedQueryable,
-    TypedQueryableBuilder, TypedSessionExt, TypedSubscriber, TypedSubscriberBuilder,
+    TypedQueryableBuilder, TypedReceiveError, TypedSessionExt, TypedSubscriber,
+    TypedSubscriberBuilder,
 };
 #[cfg(feature = "unstable")]
 #[allow(deprecated)]
