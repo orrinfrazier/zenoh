@@ -595,6 +595,13 @@ impl StorageService {
             };
 
             let timestamp = self.session.new_timestamp();
+            let action = if is_ack_put {
+                Action::Put
+            } else {
+                Action::Delete
+            };
+            let event = Event::new(stripped_key.clone(), timestamp, &action);
+
             let mut storage = self.storage.lock().await;
 
             let result = if is_ack_put {
@@ -623,6 +630,17 @@ impl StorageService {
                         q.key_expr(),
                         insertion_result
                     );
+
+                    // Update cache_latest so subsequent reads see the ack write,
+                    // mirroring the process_sample path (lines 316-358).
+                    if !matches!(insertion_result, StorageInsertionResult::Outdated)
+                        && self.capability.history == History::Latest
+                    {
+                        let mut cache_guard =
+                            self.cache_latest.latest_updates.write().await;
+                        cache_guard.insert(event.log_key(), event);
+                    }
+
                     if let Err(e) = q
                         .reply(q.key_expr().clone(), [insertion_result as u8])
                         .await
