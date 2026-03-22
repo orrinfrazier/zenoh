@@ -798,6 +798,14 @@ impl Runtime {
         self.state.max_connections
     }
 
+    /// Returns the number of active non-local connections (faces).
+    ///
+    /// **Complexity**: O(n) — acquires a read lock on `router.tables.tables` and
+    /// iterates all faces. This is acceptable because the method is only called
+    /// from admin space queries, which are infrequent. Introducing an `AtomicUsize`
+    /// counter would require instrumenting face add/remove across all four HAT
+    /// implementations (router, client, p2p_peer, linkstate_peer), adding coupling
+    /// for negligible gain on an infrequent code path.
     pub(crate) fn active_connections_count(&self) -> usize {
         let tables = zread!(self.state.router.tables.tables);
         tables.faces.values().filter(|f| !f.is_local).count()
