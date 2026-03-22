@@ -195,6 +195,20 @@ pub enum StorageInsertionResult {
     Deleted = 3,
 }
 
+impl TryFrom<u8> for StorageInsertionResult {
+    type Error = zenoh::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Outdated),
+            1 => Ok(Self::Inserted),
+            2 => Ok(Self::Replaced),
+            3 => Ok(Self::Deleted),
+            v => Err(format!("invalid StorageInsertionResult discriminant: {v}").into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredData {
     pub payload: ZBytes,
@@ -269,4 +283,52 @@ pub trait Storage: Send + Sync {
     /// The latest Timestamp corresponding to each key is either the timestamp of the delete or put whichever is the latest.
     /// Remember to fetch the entry corresponding to the `None` key
     async fn get_all_entries(&self) -> ZResult<Vec<(Option<OwnedKeyExpr>, Timestamp)>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_from_u8_valid_variants() {
+        assert_eq!(
+            StorageInsertionResult::try_from(0).unwrap(),
+            StorageInsertionResult::Outdated
+        );
+        assert_eq!(
+            StorageInsertionResult::try_from(1).unwrap(),
+            StorageInsertionResult::Inserted
+        );
+        assert_eq!(
+            StorageInsertionResult::try_from(2).unwrap(),
+            StorageInsertionResult::Replaced
+        );
+        assert_eq!(
+            StorageInsertionResult::try_from(3).unwrap(),
+            StorageInsertionResult::Deleted
+        );
+    }
+
+    #[test]
+    fn try_from_u8_invalid_returns_error() {
+        for v in [4, 5, 100, 255] {
+            assert!(
+                StorageInsertionResult::try_from(v).is_err(),
+                "expected error for discriminant {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn repr_u8_round_trip() {
+        let variants = [
+            StorageInsertionResult::Outdated,
+            StorageInsertionResult::Inserted,
+            StorageInsertionResult::Replaced,
+            StorageInsertionResult::Deleted,
+        ];
+        for v in variants {
+            assert_eq!(StorageInsertionResult::try_from(v as u8).unwrap(), v);
+        }
+    }
 }

@@ -555,10 +555,7 @@ impl StorageService {
         let prefix = self.configuration.strip_prefix.as_ref();
 
         // Handle acknowledged put/delete operations
-        let is_ack_put = q
-            .parameters()
-            .get("_ack_put")
-            .is_some_and(|v| v == "true");
+        let is_ack_put = q.parameters().get("_ack_put").is_some_and(|v| v == "true");
         let is_ack_delete = q
             .parameters()
             .get("_ack_delete")
@@ -608,12 +605,7 @@ impl StorageService {
                 let payload = q.payload().expect("validated above");
                 let encoding = q.encoding().cloned().unwrap_or_default();
                 storage
-                    .put(
-                        stripped_key,
-                        payload.clone(),
-                        encoding,
-                        timestamp,
-                    )
+                    .put(stripped_key, payload.clone(), encoding, timestamp)
                     .await
             } else {
                 storage.delete(stripped_key, timestamp).await
@@ -636,8 +628,7 @@ impl StorageService {
                     if !matches!(insertion_result, StorageInsertionResult::Outdated)
                         && self.capability.history == History::Latest
                     {
-                        let mut cache_guard =
-                            self.cache_latest.latest_updates.write().await;
+                        let mut cache_guard = self.cache_latest.latest_updates.write().await;
                         cache_guard.insert(event.log_key(), event);
                     }
 
@@ -654,12 +645,7 @@ impl StorageService {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Storage '{}' raised an error on {}: {}",
-                        self.name,
-                        op,
-                        e
-                    );
+                    tracing::error!("Storage '{}' raised an error on {}: {}", self.name, op, e);
                     if let Err(reply_err) = q.reply_err(ZBytes::from(format!("{e}"))).await {
                         tracing::warn!(
                             "Storage '{}' failed to send error reply for {}: {}",
