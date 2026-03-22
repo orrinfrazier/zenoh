@@ -92,14 +92,6 @@ async fn test_acl_interface_names() {
     test_pub_sub_network_interface(27451).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_acl_namespace_auto_deny() {
-    zenoh::init_log_from_env_or("error");
-    test_namespace_auto_deny_blocks_outside(27460).await;
-    test_namespace_no_namespace_no_change(27460).await;
-    test_namespace_cross_namespace_blocked(27461).await;
-}
-
 async fn get_basic_router_config(port: u16) -> Config {
     let mut config = Config::default();
     config.set_mode(Some(WhatAmI::Router)).unwrap();

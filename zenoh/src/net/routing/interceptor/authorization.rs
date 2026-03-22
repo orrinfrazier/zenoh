@@ -642,11 +642,12 @@ impl PolicyEnforcer {
     ///
     /// Called on every message. The namespace check (`namespace.is_none()` at the
     /// fast-path branch and `is_under_namespace()` in `namespace_aware_default()`)
-    /// adds at most one `Option::is_none()` check and one `keyexpr::starts_with()`
-    /// comparison to the hot path. Both are O(1) operations on stack-local data —
-    /// no allocation, no lock, no syscall. When no namespace is configured, the
-    /// `is_none()` fast-path returns immediately without entering
-    /// `namespace_aware_default()`.
+    /// adds at most one `Option::is_none()` check and one
+    /// `keyexpr::strip_nonwild_prefix()` call to the hot path. The prefix check
+    /// is O(k) where k is the namespace prefix length — negligible for typical
+    /// namespace strings. No allocation, no lock, no syscall. When no namespace
+    /// is configured, the `is_none()` fast-path returns immediately without
+    /// entering `namespace_aware_default()`.
     pub fn policy_decision_point(
         &self,
         subject: usize,
