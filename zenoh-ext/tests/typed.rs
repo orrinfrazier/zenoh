@@ -107,7 +107,7 @@ async fn typed_pub_sub_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn typed_subscriber_malformed_payload_yields_err() {
+async fn typed_subscriber_untyped_publisher_yields_encoding_mismatch() {
     use zenoh_ext::TypedSessionExt;
 
     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
@@ -119,7 +119,7 @@ async fn typed_subscriber_malformed_payload_yields_err() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Publish raw garbage bytes using a normal publisher
+    // Publish raw garbage bytes using a normal (untyped) publisher
     let raw_publisher = session
         .declare_publisher("test/typed/malformed")
         .await
@@ -131,8 +131,21 @@ async fn typed_subscriber_malformed_payload_yields_err() {
         .expect("timeout waiting for message")
         .expect("channel closed");
 
-    // Should be an Err, not a panic
-    assert!(received.is_err());
+    // Untyped publisher has wrong encoding — should be EncodingMismatch, not DeserializationFailed
+    match received {
+        Err(zenoh_ext::TypedReceiveError::EncodingMismatch { expected, received }) => {
+            assert!(
+                expected.contains("telemetry-payload"),
+                "expected should reference schema name, got: {expected}"
+            );
+            assert!(
+                !received.contains("telemetry-payload"),
+                "received should NOT match the typed encoding, got: {received}"
+            );
+        }
+        Err(other) => panic!("expected EncodingMismatch, got: {other:?}"),
+        Ok(_) => panic!("expected error, got Ok"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
