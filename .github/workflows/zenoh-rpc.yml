@@ -62,6 +62,9 @@ jobs:
       - name: Install latest cargo-deny
         uses: taiki-e/install-action@cargo-deny
 
+      - name: Install latest taplo
+        uses: taiki-e/install-action@taplo
+
       - name: MSRV check (Rust 1.75.0)
         run: cargo +1.75.0 check -p zenoh-rpc
 
@@ -72,10 +75,19 @@ jobs:
         run: cargo +stable clippy -p zenoh-rpc --all-targets --features unstable -- --deny warnings
 
       - name: Code format check
-        run: rustfmt +${{ env.NIGHTLY_TOOLCHAIN }} --check --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate" zenoh-rpc/src/*.rs
+        run: rustfmt +${{ env.NIGHTLY_TOOLCHAIN }} --check --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate,skip_children=true" $(git ls-files 'zenoh-rpc/src/*.rs' 'zenoh-rpc/src/**/*.rs')
 
       - name: Check licenses
         run: cargo deny --manifest-path zenoh-rpc/Cargo.toml check licenses
+
+      - name: Check TOML formatting
+        if: ${{ !contains(matrix.os, 'windows') }}
+        run: taplo fmt --check --diff zenoh-rpc/Cargo.toml zenoh-rpc/*.toml
+
+      - name: Build doc
+        run: cargo doc --no-deps -p zenoh-rpc --features unstable
+        env:
+          RUSTDOCFLAGS: -Dwarnings
 
       - name: Tests
         run: cargo test -p zenoh-rpc

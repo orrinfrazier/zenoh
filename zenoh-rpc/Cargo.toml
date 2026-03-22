@@ -47,8 +47,5 @@ zenoh-ext = { workspace = true, default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 zenoh-config = { workspace = true }
 
-[package.metadata.cargo-machete]
-ignored = ["async-trait", "serde", "tokio", "tracing", "zenoh", "zenoh-ext"]
-
 [package.metadata.docs.rs]
 features = ["unstable"]

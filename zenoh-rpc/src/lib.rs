@@ -31,12 +31,3 @@
 //!
 //! - `default`: Core RPC functionality
 //! - `unstable`: Gated experimental APIs
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // Verify the crate links and compiles successfully.
-        // Actual functionality tests live in integration tests.
-    }
-}
