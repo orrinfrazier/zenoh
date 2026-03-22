@@ -12,11 +12,11 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
-//! Typed publisher and subscriber wrappers for compile-time payload safety.
+//! Typed wrappers for compile-time payload safety.
 //!
 //! These wrappers build on the existing [`Serialize`] and [`Deserialize`] traits
-//! in zenoh-ext to provide typed pub/sub where the payload type is part of the
-//! publisher/subscriber contract. Wrong types are compile errors, not runtime failures.
+//! in zenoh-ext to provide typed pub/sub and query/reply where the payload type
+//! is part of the contract. Wrong types are compile errors, not runtime failures.
 
 use std::{
     future::{IntoFuture, Ready},
@@ -24,10 +24,11 @@ use std::{
 };
 
 use zenoh::{
-    bytes::Encoding,
+    bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
     key_expr::KeyExpr,
     pubsub::{Publisher, Subscriber},
+    query::{Query, Queryable},
     sample::Sample,
     session::Session,
     Error, Result as ZResult, Wait,
@@ -153,7 +154,119 @@ impl<T: Deserialize> IntoFuture for TypedSubscriberBuilder<'_, '_, T> {
     }
 }
 
-/// Extension trait for [`Session`] to declare typed publishers and subscribers.
+// -- Typed Query/Reply --
+
+/// A typed query received by a [`TypedQueryable`].
+///
+/// Wraps a [`Query`] with typed deserialization of the request payload
+/// and typed serialization of the reply.
+pub struct TypedQuery<Req: Deserialize, Resp: Serialize> {
+    inner: Query,
+    _phantom: PhantomData<(Req, Resp)>,
+}
+
+impl<Req: Deserialize, Resp: Serialize> TypedQuery<Req, Resp> {
+    /// Attempt to deserialize the query payload into the request type.
+    ///
+    /// Returns `Err` if the query has no payload or if deserialization fails.
+    pub fn request(&self) -> Result<Req, ZDeserializeError> {
+        match self.inner.payload() {
+            Some(payload) => z_deserialize::<Req>(payload),
+            None => Err(ZDeserializeError),
+        }
+    }
+
+    /// Reply to this query with a typed response.
+    pub async fn reply(&self, resp: &Resp) -> ZResult<()> {
+        let zbytes = z_serialize(resp);
+        self.inner.reply(self.inner.key_expr(), zbytes).await
+    }
+
+    /// Reply with an error payload.
+    pub async fn reply_err<IntoZBytes: Into<ZBytes>>(&self, payload: IntoZBytes) -> ZResult<()> {
+        self.inner.reply_err(payload).await
+    }
+
+    /// Access the underlying [`Query`] for metadata (key_expr, parameters, etc.).
+    pub fn query(&self) -> &Query {
+        &self.inner
+    }
+}
+
+/// A queryable that yields typed queries.
+///
+/// Wraps a [`Queryable`] and yields [`TypedQuery<Req, Resp>`] on each
+/// incoming query. Request payloads are deserialized into `Req`,
+/// and `reply()` serializes `Resp`.
+pub struct TypedQueryable<Req: Deserialize, Resp: Serialize> {
+    inner: Queryable<FifoChannelHandler<Query>>,
+    _phantom: PhantomData<(Req, Resp)>,
+}
+
+impl<Req: Deserialize, Resp: Serialize> TypedQueryable<Req, Resp> {
+    /// Wait for an incoming typed query.
+    pub async fn recv_async(&self) -> ZResult<TypedQuery<Req, Resp>> {
+        let query = self.inner.recv_async().await?;
+        Ok(TypedQuery {
+            inner: query,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Blocking receive for an incoming typed query.
+    pub fn recv(&self) -> ZResult<TypedQuery<Req, Resp>> {
+        let query = self.inner.recv()?;
+        Ok(TypedQuery {
+            inner: query,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+/// Builder for [`TypedQueryable`].
+pub struct TypedQueryableBuilder<'a, 'b, Req: Deserialize, Resp: Serialize> {
+    session: &'a Session,
+    key_expr: ZResult<KeyExpr<'b>>,
+    _phantom: PhantomData<(Req, Resp)>,
+}
+
+impl<Req: Deserialize, Resp: Serialize> TypedQueryableBuilder<'_, '_, Req, Resp> {
+    fn build(self) -> ZResult<TypedQueryable<Req, Resp>> {
+        let key_expr = self.key_expr?;
+        let inner = self.session.declare_queryable(key_expr).wait()?;
+        Ok(TypedQueryable {
+            inner,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<Req: Deserialize, Resp: Serialize> IntoFuture for TypedQueryableBuilder<'_, '_, Req, Resp> {
+    type Output = ZResult<TypedQueryable<Req, Resp>>;
+    type IntoFuture = Ready<Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.build())
+    }
+}
+
+/// A future that resolves to a vector of typed reply results.
+///
+/// Returned by [`TypedSessionExt::typed_get`].
+pub struct TypedGetFuture<Resp: Deserialize> {
+    result: ZResult<Vec<Result<Resp, ZDeserializeError>>>,
+}
+
+impl<Resp: Deserialize> std::future::IntoFuture for TypedGetFuture<Resp> {
+    type Output = ZResult<Vec<Result<Resp, ZDeserializeError>>>;
+    type IntoFuture = Ready<Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.result)
+    }
+}
+
+/// Extension trait for [`Session`] to declare typed publishers, subscribers, and queryables.
 pub trait TypedSessionExt {
     /// Declare a [`TypedPublisher`] for the given key expression.
     fn declare_typed_publisher<'b, T: Serialize, TryIntoKeyExpr>(
@@ -169,6 +282,28 @@ pub trait TypedSessionExt {
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedSubscriberBuilder<'_, 'b, T>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>;
+
+    /// Declare a [`TypedQueryable`] for the given key expression.
+    fn declare_typed_queryable<'b, Req: Deserialize, Resp: Serialize, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+    ) -> TypedQueryableBuilder<'_, 'b, Req, Resp>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>;
+
+    /// Send a typed get (query) and collect typed replies.
+    ///
+    /// Serializes `Req` into the query payload, sends the query, and
+    /// deserializes each reply into `Resp`.
+    fn typed_get<'b, Req: Serialize, Resp: Deserialize, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+        request: &Req,
+    ) -> TypedGetFuture<Resp>
     where
         TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>;
@@ -203,5 +338,49 @@ impl TypedSessionExt for Session {
             key_expr: key_expr.try_into().map_err(Into::into),
             _phantom: PhantomData,
         }
+    }
+
+    fn declare_typed_queryable<'b, Req: Deserialize, Resp: Serialize, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+    ) -> TypedQueryableBuilder<'_, 'b, Req, Resp>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>,
+    {
+        TypedQueryableBuilder {
+            session: self,
+            key_expr: key_expr.try_into().map_err(Into::into),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn typed_get<'b, Req: Serialize, Resp: Deserialize, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+        request: &Req,
+    ) -> TypedGetFuture<Resp>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>,
+    {
+        let result = (|| -> ZResult<Vec<Result<Resp, ZDeserializeError>>> {
+            let key_expr = key_expr.try_into().map_err(Into::into)?;
+            let payload = z_serialize(request);
+            let receiver = self.get(key_expr).payload(payload).wait()?;
+            let mut replies = Vec::new();
+            while let Ok(reply) = receiver.recv() {
+                match reply.into_result() {
+                    Ok(sample) => {
+                        replies.push(z_deserialize::<Resp>(sample.payload()));
+                    }
+                    Err(_reply_err) => {
+                        // Reply errors are not deserialization errors — skip them
+                    }
+                }
+            }
+            Ok(replies)
+        })();
+        TypedGetFuture { result }
     }
 }
