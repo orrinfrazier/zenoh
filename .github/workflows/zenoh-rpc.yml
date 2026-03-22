@@ -1,0 +1,96 @@
+#
+# Copyright (c) 2023 ZettaScale Technology
+#
+# This program and the accompanying materials are made available under the
+# terms of the Eclipse Public License 2.0 which is available at
+# http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
+# which is available at https://www.apache.org/licenses/LICENSE-2.0.
+#
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+#
+# Contributors:
+#   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
+#
+name: zenoh-rpc CI
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "zenoh-rpc/**"
+      - ".github/workflows/zenoh-rpc.yml"
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "zenoh-rpc/**"
+      - ".github/workflows/zenoh-rpc.yml"
+
+env:
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  CARGO_PROFILE_DEV_DEBUG: false
+  NIGHTLY_TOOLCHAIN: "nightly"
+
+jobs:
+  check:
+    name: zenoh-rpc checks on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Clone this repository
+        uses: actions/checkout@v4
+
+      - name: Update Stable Rust toolchain
+        run: rustup update stable
+
+      - name: Update Rust 1.75.0 toolchain
+        run: rustup update 1.75.0
+
+      - name: Make sure necessary tools are installed
+        run: |
+          rustup component add clippy --toolchain stable
+          rustup component add rustfmt --toolchain ${{ env.NIGHTLY_TOOLCHAIN }}
+
+      - name: Setup rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install latest cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Install latest taplo
+        uses: taiki-e/install-action@taplo
+
+      - name: MSRV check (Rust 1.75.0)
+        run: cargo +1.75.0 check -p zenoh-rpc
+
+      - name: Clippy zenoh-rpc
+        run: cargo +stable clippy -p zenoh-rpc --all-targets -- --deny warnings
+
+      - name: Clippy zenoh-rpc unstable
+        run: cargo +stable clippy -p zenoh-rpc --all-targets --features unstable -- --deny warnings
+
+      - name: Code format check
+        run: rustfmt +${{ env.NIGHTLY_TOOLCHAIN }} --check --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate,skip_children=true" $(git ls-files 'zenoh-rpc/src/*.rs' 'zenoh-rpc/src/**/*.rs')
+
+      - name: Check licenses
+        run: cargo deny --manifest-path zenoh-rpc/Cargo.toml check licenses
+
+      - name: Check TOML formatting
+        if: ${{ !contains(matrix.os, 'windows') }}
+        run: taplo fmt --check --diff zenoh-rpc/Cargo.toml zenoh-rpc/*.toml
+
+      - name: Build doc
+        run: cargo doc --no-deps -p zenoh-rpc --features unstable
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+
+      - name: Tests
+        run: cargo test -p zenoh-rpc
+
+      - name: Tests unstable
+        run: cargo test -p zenoh-rpc --features unstable
