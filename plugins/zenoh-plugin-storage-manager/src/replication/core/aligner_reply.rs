@@ -250,6 +250,7 @@ impl Replication {
                     let encoding = item
                         .encoding
                         .map(|bytes| {
+                            // Zenoh encodings are MIME-type strings, always valid UTF-8.
                             Encoding::from(String::from_utf8_lossy(&bytes).into_owned())
                         })
                         .unwrap_or_default();
