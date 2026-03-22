@@ -794,8 +794,8 @@ async fn test_max_connections_admin_status() -> ZResult<()> {
 
     tokio::time::sleep(SLEEP).await;
 
-    // Query admin space for router info.
-    let replies = ztimeout!(router.get("@/router/**")).unwrap();
+    // Query admin space for router info — admin keys are @/{zid}/{whatami}
+    let replies = ztimeout!(router.get("@/**")).unwrap();
 
     let mut found_connections_info = false;
     while let Ok(reply) = replies.recv_async().await {
