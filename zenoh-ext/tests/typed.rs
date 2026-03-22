@@ -14,7 +14,9 @@
 
 use std::time::Duration;
 
-use zenoh_ext::{Deserialize, Serialize, ZDeserializeError, ZDeserializer, ZSerializer};
+use zenoh_ext::{
+    Deserialize, Serialize, TypedSchema, ZDeserializeError, ZDeserializer, ZSerializer,
+};
 
 // -- Test payload types --
 
@@ -41,6 +43,10 @@ impl Deserialize for TelemetryPayload {
             label: deserializer.deserialize()?,
         })
     }
+}
+
+impl TypedSchema for TelemetryPayload {
+    const SCHEMA_NAME: &'static str = "test.telemetry.v1";
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -108,7 +114,7 @@ async fn typed_subscriber_malformed_payload_yields_err() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn typed_publisher_sets_encoding() {
+async fn typed_publisher_encoding_uses_schema_name() {
     use zenoh_ext::TypedSessionExt;
 
     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
@@ -120,9 +126,38 @@ async fn typed_publisher_sets_encoding() {
 
     let encoding = publisher.encoding();
     let encoding_str = format!("{encoding}");
+    // Encoding must use the user-provided SCHEMA_NAME, not std::any::type_name
+    assert_eq!(
+        encoding_str, "zenoh-ext/typed:test.telemetry.v1",
+        "Encoding should use TypedSchema::SCHEMA_NAME, got: {encoding_str}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_encoding_is_stable_across_builds() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+
+    // Create two publishers for the same type — encoding must be identical and deterministic
+    let pub1 = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/stable1")
+        .await
+        .unwrap();
+    let pub2 = session
+        .declare_typed_publisher::<TelemetryPayload, _>("test/typed/stable2")
+        .await
+        .unwrap();
+
+    let enc1 = format!("{}", pub1.encoding());
+    let enc2 = format!("{}", pub2.encoding());
+
+    assert_eq!(enc1, enc2, "Same type must produce identical encoding");
+
+    // Encoding must NOT contain Rust-specific module paths (the old type_name behavior)
     assert!(
-        encoding_str.contains("typed"),
-        "Encoding should contain 'typed' marker, got: {encoding_str}"
+        !enc1.contains("::"),
+        "Encoding must not contain Rust module paths (::), got: {enc1}"
     );
 }
 
