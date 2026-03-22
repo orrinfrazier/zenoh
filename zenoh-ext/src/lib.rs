@@ -85,7 +85,7 @@ pub use crate::{
     },
     publication_cache::{PublicationCache, PublicationCacheBuilder},
     publisher_ext::AdvancedPublisherBuilderExt,
-    rpc::{ServiceError, StatusCode},
+    rpc::{deadline_attachment, DeadlineContext, ServiceError, StatusCode, DEADLINE_ATTACHMENT_KEY},
     querying_subscriber::{
         ExtractSample, FetchingSubscriber, FetchingSubscriberBuilder, KeySpace, LivelinessSpace,
         QueryingSubscriberBuilder, UserSpace,

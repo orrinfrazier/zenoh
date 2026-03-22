@@ -14,7 +14,12 @@
 
 #![cfg(feature = "unstable")]
 
-use zenoh_ext::{z_deserialize, z_serialize, ServiceError, StatusCode};
+use std::time::Duration;
+
+use zenoh_ext::{
+    deadline_attachment, z_deserialize, z_serialize, DeadlineContext, ServiceError, StatusCode,
+    DEADLINE_ATTACHMENT_KEY,
+};
 
 // -- Round-trip serialization for each variant --
 
@@ -203,4 +208,94 @@ fn implements_std_error() {
     };
     // Verify it can be used as a dyn Error
     let _: &dyn std::error::Error = &err;
+}
+
+// -- DeadlineContext tests --
+
+#[test]
+fn deadline_context_remaining_returns_positive_for_future_deadline() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Set the deadline 10 seconds from now
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_millis() as u64;
+    let ctx = DeadlineContext::from_millis(now_ms + 10_000);
+
+    let remaining = ctx.remaining();
+    // Should be close to 10 seconds (allow some margin for test execution)
+    assert!(remaining > Duration::from_secs(9), "remaining: {remaining:?}");
+    assert!(
+        remaining <= Duration::from_secs(10),
+        "remaining: {remaining:?}"
+    );
+}
+
+#[test]
+fn deadline_context_remaining_returns_zero_for_past_deadline() {
+    // Set the deadline 10 seconds in the past
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_millis() as u64;
+    let ctx = DeadlineContext::from_millis(now_ms.saturating_sub(10_000));
+
+    assert_eq!(ctx.remaining(), Duration::ZERO);
+}
+
+#[test]
+fn deadline_context_is_expired_for_past_deadline() {
+    // Deadline at UNIX epoch — long expired
+    let ctx = DeadlineContext::from_millis(0);
+    assert!(ctx.is_expired());
+}
+
+#[test]
+fn deadline_context_is_not_expired_for_future_deadline() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_millis() as u64;
+    let ctx = DeadlineContext::from_millis(now_ms + 60_000);
+
+    assert!(!ctx.is_expired());
+}
+
+#[test]
+fn deadline_attachment_produces_valid_key_value() {
+    let timeout = Duration::from_secs(5);
+    let (key, value) = deadline_attachment(timeout);
+
+    assert_eq!(key, DEADLINE_ATTACHMENT_KEY);
+
+    // The value should be parseable as u64 and be in the future
+    let deadline_ms: u64 = value.parse().expect("value should be a valid u64");
+
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_millis() as u64;
+
+    // The deadline should be approximately now + 5 seconds (allow 1 second margin)
+    assert!(
+        deadline_ms >= now_ms + 4_000,
+        "deadline_ms {deadline_ms} should be >= now + 4s ({now_ms})"
+    );
+    assert!(
+        deadline_ms <= now_ms + 6_000,
+        "deadline_ms {deadline_ms} should be <= now + 6s ({now_ms})"
+    );
+}
+
+#[test]
+fn deadline_context_from_millis_roundtrip() {
+    let original_ms: u64 = 1_700_000_000_000; // ~2023-11-14
+    let ctx = DeadlineContext::from_millis(original_ms);
+    assert_eq!(ctx.deadline_ms(), original_ms);
 }
