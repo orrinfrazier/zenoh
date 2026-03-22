@@ -26,6 +26,12 @@ impl Serialize for EmptySchemaName {
     fn serialize(&self, _serializer: &mut ZSerializer) {}
 }
 
+impl Deserialize for EmptySchemaName {
+    fn deserialize(_deserializer: &mut ZDeserializer) -> Result<Self, ZDeserializeError> {
+        Ok(Self)
+    }
+}
+
 impl TypedSchema for EmptySchemaName {
     const SCHEMA_NAME: &'static str = "";
 }
@@ -34,6 +40,12 @@ struct WhitespaceSchemaName;
 
 impl Serialize for WhitespaceSchemaName {
     fn serialize(&self, _serializer: &mut ZSerializer) {}
+}
+
+impl Deserialize for WhitespaceSchemaName {
+    fn deserialize(_deserializer: &mut ZDeserializer) -> Result<Self, ZDeserializeError> {
+        Ok(Self)
+    }
 }
 
 impl TypedSchema for WhitespaceSchemaName {
@@ -611,6 +623,30 @@ async fn typed_publisher_rejects_whitespace_only_schema_name() {
     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
     let _publisher = session
         .declare_typed_publisher::<WhitespaceSchemaName, _>("test/typed/validate/whitespace")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "must not be empty")]
+async fn typed_subscriber_rejects_empty_schema_name() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let _subscriber = session
+        .declare_typed_subscriber::<EmptySchemaName, _>("test/typed/validate/sub/empty")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "must not be empty")]
+async fn typed_subscriber_rejects_whitespace_only_schema_name() {
+    use zenoh_ext::TypedSessionExt;
+
+    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let _subscriber = session
+        .declare_typed_subscriber::<WhitespaceSchemaName, _>("test/typed/validate/sub/whitespace")
         .await
         .unwrap();
 }
