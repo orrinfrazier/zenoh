@@ -112,18 +112,33 @@ impl MockStorage {
         let _queryable = session
             .declare_queryable(key_space)
             .callback(move |query| {
-                let key = query.key_expr().to_string();
-                if let Some(data) = store_read.lock().unwrap().get(&key) {
+                let qkey = query.key_expr().to_string();
+                let lock = store_read.lock().unwrap();
+                // Exact match first, then prefix/wildcard match
+                if let Some(data) = lock.get(&qkey) {
                     let _ = query.reply(query.key_expr(), data.clone()).wait();
+                } else {
+                    // Wildcard: reply with all entries whose key starts with
+                    // the query prefix (strip trailing /**)
+                    let prefix = qkey.trim_end_matches("/**").trim_end_matches("/*");
+                    for (k, v) in lock.iter() {
+                        if k.starts_with(prefix) && k != &qkey {
+                            let _ = query.reply(k.as_str(), v.clone()).wait();
+                        }
+                    }
                 }
             })
             .wait()?;
 
-        Ok(MockStorage {
+        Ok(Self {
             store,
             _subscriber,
             _queryable,
         })
+    }
+
+    fn len(&self) -> usize {
+        self.store.lock().unwrap().len()
     }
 }
 
@@ -896,6 +911,178 @@ async fn event_subscriber_cursor_survives_subscriber_drop() {
     assert_eq!(
         sample.payload().try_to_string().unwrap().as_ref(),
         "after-restart"
+    );
+
+    session.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end resume tests — issue #119
+// ---------------------------------------------------------------------------
+
+/// Publish 10 events, consume 5, flush cursor, drop subscriber, recreate with
+/// same consumer name — verify cursor is restored at event 5's position and
+/// new events are received correctly.
+///
+/// Note: time-range-filtered catch-up of historical events (events 5-9) requires
+/// a real storage backend with TimeRange support. The MockStorage does not filter
+/// by time, so we verify cursor restoration and new-event reception only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_resume_from_exact_position() {
+    const SLEEP: Duration = Duration::from_millis(300);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = open_test_session();
+
+    let _cursor_storage = MockStorage::new(&session, "@cursors/**").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // --- Subscriber #1: publish 10 events, consume exactly 5 ---
+    let cursor_after_5;
+    {
+        let sub1: EventSubscriber = ztimeout!(session
+            .declare_subscriber("test/resume-exact/**")
+            .event()
+            .consumer_name("exact-consumer"))
+        .unwrap();
+
+        for i in 0..10 {
+            ztimeout!(session.put(&format!("test/resume-exact/{i}"), format!("event-{i}")))
+                .unwrap();
+            tokio::time::sleep(SLEEP).await;
+        }
+
+        // Consume exactly 5
+        for i in 0..5 {
+            let sample = ztimeout!(sub1.recv_async()).unwrap();
+            assert_eq!(
+                sample.payload().try_to_string().unwrap().as_ref(),
+                &format!("event-{i}"),
+                "subscriber #1 should receive events in order"
+            );
+        }
+
+        cursor_after_5 = sub1.cursor_position();
+        assert!(cursor_after_5.is_some(), "cursor should be at event 4");
+
+        ztimeout!(sub1.flush_cursor()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // sub1 dropped — remaining events 5-9 discarded from channel
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // --- Subscriber #2: same consumer, cursor should be restored ---
+    let sub2: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/resume-exact/**")
+        .event()
+        .consumer_name("exact-consumer"))
+    .unwrap();
+
+    assert_eq!(
+        sub2.cursor_position(),
+        cursor_after_5,
+        "cursor should be restored to event 4's position"
+    );
+
+    // Publish new events — subscriber should receive them
+    for i in 10..13 {
+        ztimeout!(session.put(&format!("test/resume-exact/{i}"), format!("event-{i}"))).unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    for i in 10..13 {
+        let sample = ztimeout!(sub2.recv_async()).unwrap();
+        assert_eq!(
+            sample.payload().try_to_string().unwrap().as_ref(),
+            &format!("event-{i}"),
+            "subscriber #2 should receive new events after resume"
+        );
+    }
+
+    session.close().await.unwrap();
+}
+
+/// Two consumers on the same topic track cursors independently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_multiple_consumers_independent_cursors() {
+    const SLEEP: Duration = Duration::from_millis(300);
+
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = open_test_session();
+
+    let _cursor_storage = MockStorage::new(&session, "@cursors/**").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // --- Consumer A: consume 3 events, flush ---
+    let cursor_a;
+    {
+        let sub_a: EventSubscriber = ztimeout!(session
+            .declare_subscriber("test/multi-consumer/**")
+            .event()
+            .consumer_name("consumer-A"))
+        .unwrap();
+
+        for i in 0..3 {
+            ztimeout!(session.put(&format!("test/multi-consumer/{i}"), format!("msg-{i}")))
+                .unwrap();
+            tokio::time::sleep(SLEEP).await;
+            let _sample = ztimeout!(sub_a.recv_async()).unwrap();
+        }
+
+        cursor_a = sub_a.cursor_position();
+        ztimeout!(sub_a.flush_cursor()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // --- Consumer B: consume 1 event, flush ---
+    let cursor_b;
+    {
+        let sub_b: EventSubscriber = ztimeout!(session
+            .declare_subscriber("test/multi-consumer/**")
+            .event()
+            .consumer_name("consumer-B"))
+        .unwrap();
+
+        ztimeout!(session.put("test/multi-consumer/extra", "msg-extra")).unwrap();
+        tokio::time::sleep(SLEEP).await;
+        let _sample = ztimeout!(sub_b.recv_async()).unwrap();
+
+        cursor_b = sub_b.cursor_position();
+        ztimeout!(sub_b.flush_cursor()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // --- Recreate both: verify independent cursors ---
+    let sub_a2: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/multi-consumer/**")
+        .event()
+        .consumer_name("consumer-A"))
+    .unwrap();
+
+    let sub_b2: EventSubscriber = ztimeout!(session
+        .declare_subscriber("test/multi-consumer/**")
+        .event()
+        .consumer_name("consumer-B"))
+    .unwrap();
+
+    assert_eq!(
+        sub_a2.cursor_position(),
+        cursor_a,
+        "consumer-A should restore its own cursor"
+    );
+    assert_eq!(
+        sub_b2.cursor_position(),
+        cursor_b,
+        "consumer-B should restore its own cursor"
+    );
+    assert_ne!(
+        cursor_a, cursor_b,
+        "consumer-A and consumer-B should have different cursor positions"
     );
 
     session.close().await.unwrap();
