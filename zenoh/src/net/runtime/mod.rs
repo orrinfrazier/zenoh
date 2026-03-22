@@ -124,6 +124,7 @@ pub(crate) struct RuntimeState {
     start_conditions: Arc<StartConditions>,
     pending_connections: tokio::sync::Mutex<HashSet<ZenohIdProto>>,
     namespace: Option<OwnedNonWildKeyExpr>,
+    max_connections: Option<usize>,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::StatsRegistry,
 }
@@ -555,12 +556,20 @@ impl RuntimeBuilder {
 
     pub async fn build(self) -> ZResult<Runtime> {
         let RuntimeBuilder {
-            config,
+            mut config,
             #[cfg(feature = "plugins")]
             mut plugins_manager,
             #[cfg(feature = "shared-memory")]
             shm_clients,
         } = self;
+
+        // If max_connections is set, override transport/unicast/max_sessions
+        if let Some(max) = *config.max_connections() {
+            tracing::info!("max_connections={max} configured, overriding transport/unicast/max_sessions");
+            config
+                .insert_json5("transport/unicast/max_sessions", &max.to_string())
+                .map_err(|e| zerror!("Failed to set max_sessions from max_connections: {}", e))?;
+        }
 
         tracing::debug!("Zenoh Rust API {}", GIT_VERSION);
         let zid = (*config.id()).unwrap_or_default().into();
@@ -615,6 +624,7 @@ impl RuntimeBuilder {
         let shm_init_mode = *config.transport.shared_memory.mode();
 
         let namespace = config.namespace().clone();
+        let max_connections = *config.max_connections();
         let config = Notifier::new(crate::config::Config(config));
 
         let runtime = Runtime {
@@ -634,6 +644,7 @@ impl RuntimeBuilder {
                 start_conditions: Arc::new(StartConditions::default()),
                 pending_connections: tokio::sync::Mutex::new(HashSet::new()),
                 namespace,
+                max_connections,
                 #[cfg(feature = "stats")]
                 stats,
             }),
@@ -778,6 +789,15 @@ impl Runtime {
     #[allow(dead_code)]
     pub fn get_shm_provider(&self) -> ShmProviderState {
         self.state.get_shm_provider()
+    }
+
+    pub(crate) fn max_connections(&self) -> Option<usize> {
+        self.state.max_connections
+    }
+
+    pub(crate) fn active_connections_count(&self) -> usize {
+        let tables = zread!(self.state.router.tables.tables);
+        tables.faces.values().filter(|f| !f.is_local).count()
     }
 
     pub(crate) fn start_conditions(&self) -> &Arc<StartConditions> {
