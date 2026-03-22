@@ -25,13 +25,14 @@ use zenoh::{
     internal::{zerror, zlock},
     key_expr::KeyExpr,
     pubsub::{Subscriber, SubscriberBuilder},
-    query::{Parameters, Queryable, Selector, TimeBound, TimeExpr, TimeRange, ZenohParameters},
+    query::{Parameters, Selector, TimeBound, TimeExpr, TimeRange, ZenohParameters},
     sample::Sample,
     session::WeakSession,
     time::Timestamp,
     Resolvable, Result as ZResult, Session, Wait,
 };
 
+use crate::cursor_persistence::{CursorPersister, PutPersister};
 use crate::serialization::{Deserialize, Serialize, ZDeserializeError, ZDeserializer, ZSerializer};
 use crate::{z_deserialize, z_serialize};
 
@@ -172,6 +173,7 @@ impl<'a, 'b> EventSubscriberBuilderExt<'a, 'b> for SubscriberBuilder<'a, 'b, Def
             consumer_name: None,
             flush_interval: Duration::from_secs(5),
             buffer_size: 256,
+            cursor_persister: None,
         }
     }
 }
@@ -193,6 +195,7 @@ pub struct EventSubscriberBuilder<'a, 'b> {
     pub(crate) consumer_name: Option<String>,
     pub(crate) flush_interval: Duration,
     pub(crate) buffer_size: usize,
+    pub(crate) cursor_persister: Option<Arc<dyn CursorPersister>>,
 }
 
 #[zenoh_macros::unstable]
@@ -230,6 +233,16 @@ impl<'a, 'b> EventSubscriberBuilder<'a, 'b> {
         self.buffer_size = size;
         self
     }
+
+    /// Set a custom cursor persistence strategy.
+    ///
+    /// By default, [`PutPersister`] is used (fire-and-forget `session.put()`).
+    /// Provide an alternative implementation to use confirmed writes or
+    /// delegate to external storage.
+    pub fn cursor_persister<P: CursorPersister + 'static>(mut self, persister: P) -> Self {
+        self.cursor_persister = Some(Arc::new(persister));
+        self
+    }
 }
 
 #[cfg(feature = "unstable")]
@@ -264,6 +277,7 @@ struct EventSubscriberState {
     persistence_key: String,
     last_flushed: Option<Timestamp>,
     session: WeakSession,
+    persister: Arc<dyn CursorPersister>,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +293,6 @@ pub struct EventSubscriber {
     receiver: flume::Receiver<Sample>,
     state: Arc<Mutex<EventSubscriberState>>,
     _subscriber: Subscriber<()>,
-    _queryable: Queryable<()>,
     _flush_task: Option<tokio::task::JoinHandle<()>>,
     flush_interval: Duration,
 }
@@ -301,12 +314,13 @@ impl Drop for EventSubscriber {
 impl EventSubscriber {
     fn new(conf: EventSubscriberBuilder<'_, '_>) -> ZResult<Self> {
         let key_expr = conf.key_expr?.into_owned();
-        let consumer_name = conf
-            .consumer_name
-            .unwrap_or_else(|| "default".to_string());
+        let consumer_name = conf.consumer_name.unwrap_or_else(|| "default".to_string());
         EventSubscriberBuilder::validate_consumer_name(&consumer_name)?;
         let flush_interval = conf.flush_interval;
         let session = conf.session;
+        let persister: Arc<dyn CursorPersister> = conf
+            .cursor_persister
+            .unwrap_or_else(|| Arc::new(PutPersister));
 
         let mut bookmark = CursorBookmark::new(&consumer_name, key_expr.as_str());
         let persistence_key = bookmark.persistence_key();
@@ -335,13 +349,8 @@ impl EventSubscriber {
             })
             .wait()?;
 
-        let last_catchup_ts = Self::do_catchup(
-            session,
-            &key_expr,
-            cursor_position,
-            &sender,
-            &mut bookmark,
-        );
+        let last_catchup_ts =
+            Self::do_catchup(session, &key_expr, cursor_position, &sender, &mut bookmark);
 
         Self::transition_to_live(&live_buffer, last_catchup_ts, &sender, &mut bookmark);
         live_ready.store(true, std::sync::atomic::Ordering::Release);
@@ -351,9 +360,8 @@ impl EventSubscriber {
             persistence_key: persistence_key.clone(),
             last_flushed: None,
             session: session.downgrade(),
+            persister,
         }));
-
-        let queryable = Self::declare_cursor_queryable(session, &persistence_key, &state)?;
 
         let flush_handle = Self::spawn_auto_flush(flush_interval, &state);
 
@@ -361,7 +369,6 @@ impl EventSubscriber {
             receiver,
             state,
             _subscriber: subscriber,
-            _queryable: queryable,
             _flush_task: flush_handle,
             flush_interval,
         })
@@ -406,9 +413,7 @@ impl EventSubscriber {
         if let Some(cursor_ts) = cursor_position {
             let mut params = Parameters::empty();
             params.set_time_range(TimeRange {
-                start: TimeBound::Exclusive(TimeExpr::Fixed(
-                    cursor_ts.get_time().to_system_time(),
-                )),
+                start: TimeBound::Exclusive(TimeExpr::Fixed(cursor_ts.get_time().to_system_time())),
                 end: TimeBound::Unbounded,
             });
 
@@ -464,25 +469,6 @@ impl EventSubscriber {
                 let _ = sender.send(sample);
             }
         }
-    }
-
-    /// Declare a queryable on the persistence key to serve cursor data on demand.
-    fn declare_cursor_queryable(
-        session: &Session,
-        persistence_key: &str,
-        state: &Arc<Mutex<EventSubscriberState>>,
-    ) -> ZResult<Queryable<()>> {
-        let queryable_state = state.clone();
-        session
-            .declare_queryable(persistence_key)
-            .callback(move |query| {
-                let lock = zlock!(queryable_state);
-                if lock.last_flushed.is_some() {
-                    let zbytes: ZBytes = z_serialize(&lock.bookmark);
-                    let _ = query.reply(query.key_expr(), zbytes).wait();
-                }
-            })
-            .wait()
     }
 
     /// Spawn the background auto-flush task, if a tokio runtime is available.
@@ -545,8 +531,8 @@ impl EventSubscriber {
     }
 
     async fn do_flush_async(state: &Arc<Mutex<EventSubscriberState>>) -> ZResult<()> {
-        // Extract data needed for put under the lock, then drop before await
-        let (zbytes, persistence_key, current, session) = {
+        // Extract data needed for persist under the lock, then drop before await
+        let (zbytes, persistence_key, current, session, persister) = {
             let lock = zlock!(state);
             let current = lock.bookmark.cursor_position();
 
@@ -558,12 +544,13 @@ impl EventSubscriber {
             let zbytes: ZBytes = z_serialize(&lock.bookmark);
             let persistence_key = lock.persistence_key.clone();
             let session = lock.session.clone();
-            (zbytes, persistence_key, current, session)
+            let persister = lock.persister.clone();
+            (zbytes, persistence_key, current, session, persister)
             // lock dropped here
         };
 
         // Session may be closed during shutdown — treat as success
-        match session.put(&persistence_key, zbytes).await {
+        match persister.persist(&session, &persistence_key, zbytes).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::debug!("EventSubscriber flush skipped (session closed?): {e}");
@@ -571,7 +558,9 @@ impl EventSubscriber {
             }
         }
 
-        // Re-acquire to update last_flushed
+        // Re-acquire to update last_flushed. A concurrent flush may have set a
+        // newer value; overwriting with our `current` is safe because it only
+        // causes one extra no-op persist on the next cycle.
         let mut lock = zlock!(state);
         lock.last_flushed = current;
 
@@ -580,8 +569,8 @@ impl EventSubscriber {
 
     /// Synchronous best-effort flush for use in Drop. Never panics.
     fn do_flush_sync(state: &Arc<Mutex<EventSubscriberState>>) {
-        let (zbytes, persistence_key, current, session) = {
-            let lock = zlock!(state);
+        let (zbytes, persistence_key, current, session, persister) = {
+            let Ok(lock) = state.lock() else { return };
             let current = lock.bookmark.cursor_position();
 
             if current.is_none() || current == lock.last_flushed {
@@ -591,11 +580,12 @@ impl EventSubscriber {
             let zbytes: ZBytes = z_serialize(&lock.bookmark);
             let persistence_key = lock.persistence_key.clone();
             let session = lock.session.clone();
-            (zbytes, persistence_key, current, session)
+            let persister = lock.persister.clone();
+            (zbytes, persistence_key, current, session, persister)
         };
 
         // Best-effort: ignore errors (session may already be closed)
-        let _ = session.put(&persistence_key, zbytes).wait();
+        let _ = persister.persist_sync(&session, &persistence_key, zbytes);
 
         if let Ok(mut lock) = state.lock() {
             lock.last_flushed = current;
@@ -629,9 +619,7 @@ impl std::future::Future for EventRecvFut<'_> {
                 }
                 std::task::Poll::Ready(Ok(sample))
             }
-            std::task::Poll::Ready(Err(err)) => {
-                std::task::Poll::Ready(Err(err.into()))
-            }
+            std::task::Poll::Ready(Err(err)) => std::task::Poll::Ready(Err(err.into())),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
