@@ -82,7 +82,8 @@ pub use crate::{
     },
     cursor_persistence::{CursorPersister, PutPersister},
     event_subscriber::{
-        CursorBookmark, EventSubscriber, EventSubscriberBuilder, EventSubscriberBuilderExt,
+        CursorBookmark, EventRecvFut, EventSubscriber, EventSubscriberBuilder,
+        EventSubscriberBuilderExt,
     },
     publication_cache::{PublicationCache, PublicationCacheBuilder},
     publisher_ext::AdvancedPublisherBuilderExt,

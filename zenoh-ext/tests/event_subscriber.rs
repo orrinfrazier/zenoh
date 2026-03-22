@@ -696,6 +696,40 @@ async fn event_subscriber_custom_persister_called_on_flush() {
     session.close().await.unwrap();
 }
 
+/// Drop path calls persist_sync (best-effort flush without explicit flush_cursor).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_subscriber_drop_flushes_via_persist_sync() {
+    zenoh_util::init_log_from_env_or("error");
+
+    let session = open_test_session();
+
+    let (persister, calls) = RecordingPersister::new();
+
+    {
+        let sub: EventSubscriber = ztimeout!(session
+            .declare_subscriber("test/drop-sync/**")
+            .event()
+            .consumer_name("drop-sync-consumer")
+            .flush_interval(Duration::from_secs(300))
+            .cursor_persister(persister))
+        .unwrap();
+
+        ztimeout!(session.put("test/drop-sync/a", "val")).unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let _sample = ztimeout!(sub.recv_async()).unwrap();
+        assert!(sub.cursor_position().is_some());
+        // Do NOT call flush_cursor — rely on Drop
+    }
+
+    {
+        let recorded = calls.lock().unwrap();
+        assert!(!recorded.is_empty(), "Drop should have called persist_sync");
+    }
+
+    session.close().await.unwrap();
+}
+
 /// Cursor survives subscriber drop and is loaded by a new subscriber
 /// via mock storage (issue #72).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

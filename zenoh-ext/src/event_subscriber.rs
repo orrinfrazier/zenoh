@@ -558,7 +558,9 @@ impl EventSubscriber {
             }
         }
 
-        // Re-acquire to update last_flushed
+        // Re-acquire to update last_flushed. A concurrent flush may have set a
+        // newer value; overwriting with our `current` is safe because it only
+        // causes one extra no-op persist on the next cycle.
         let mut lock = zlock!(state);
         lock.last_flushed = current;
 
@@ -568,7 +570,7 @@ impl EventSubscriber {
     /// Synchronous best-effort flush for use in Drop. Never panics.
     fn do_flush_sync(state: &Arc<Mutex<EventSubscriberState>>) {
         let (zbytes, persistence_key, current, session, persister) = {
-            let lock = zlock!(state);
+            let Ok(lock) = state.lock() else { return };
             let current = lock.bookmark.cursor_position();
 
             if current.is_none() || current == lock.last_flushed {
