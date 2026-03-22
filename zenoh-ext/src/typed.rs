@@ -35,16 +35,37 @@ use zenoh::{
 
 use crate::{z_deserialize, z_serialize, Deserialize, Serialize, ZDeserializeError};
 
+/// Provides a stable, cross-language identifier for typed pub/sub encoding.
+///
+/// Implementors choose a name that is consistent across all participants
+/// (including non-Rust clients). This replaces the use of [`std::any::type_name`],
+/// whose output is not guaranteed stable across compiler versions.
+///
+/// # Example
+/// ```
+/// use zenoh_ext::TypedSchema;
+///
+/// struct Telemetry { /* ... */ }
+///
+/// impl TypedSchema for Telemetry {
+///     const SCHEMA_NAME: &'static str = "com.example.telemetry.v1";
+/// }
+/// ```
+pub trait TypedSchema {
+    /// A stable, unique identifier for this type's wire encoding.
+    const SCHEMA_NAME: &'static str;
+}
+
 /// A publisher that only accepts payloads of type `T`.
 ///
 /// Wraps a [`Publisher`] and serializes `T` via [`ZSerializer`](crate::ZSerializer)
 /// on each `put()`. Attempting to publish a wrong type is a compile error.
-pub struct TypedPublisher<'a, T: Serialize> {
+pub struct TypedPublisher<'a, T: Serialize + TypedSchema> {
     inner: Publisher<'a>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Serialize> TypedPublisher<'_, T> {
+impl<T: Serialize + TypedSchema> TypedPublisher<'_, T> {
     /// Publish a typed payload.
     pub async fn put(&self, payload: &T) -> ZResult<()> {
         let zbytes = z_serialize(payload);
@@ -66,12 +87,12 @@ impl<T: Serialize> TypedPublisher<'_, T> {
 ///
 /// Wraps a [`Subscriber`] and yields `Result<T, ZDeserializeError>` on each
 /// received sample. Malformed payloads yield `Err`, never panic.
-pub struct TypedSubscriber<T: Deserialize> {
+pub struct TypedSubscriber<T: Deserialize + TypedSchema> {
     inner: Subscriber<FifoChannelHandler<Sample>>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Deserialize> TypedSubscriber<T> {
+impl<T: Deserialize + TypedSchema> TypedSubscriber<T> {
     /// Wait for an incoming typed message.
     ///
     /// The outer `ZResult` fails only if the channel is closed.
@@ -94,17 +115,16 @@ impl<T: Deserialize> TypedSubscriber<T> {
 }
 
 /// Builder for [`TypedPublisher`].
-pub struct TypedPublisherBuilder<'a, 'b, T: Serialize> {
+pub struct TypedPublisherBuilder<'a, 'b, T: Serialize + TypedSchema> {
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
     _phantom: PhantomData<T>,
 }
 
-impl<'b, T: Serialize> TypedPublisherBuilder<'_, 'b, T> {
+impl<'b, T: Serialize + TypedSchema> TypedPublisherBuilder<'_, 'b, T> {
     fn build(self) -> ZResult<TypedPublisher<'b, T>> {
         let key_expr = self.key_expr?;
-        let encoding =
-            Encoding::from(format!("zenoh-ext/typed:{}", std::any::type_name::<T>()));
+        let encoding = Encoding::from(format!("zenoh-ext/typed:{}", T::SCHEMA_NAME));
         let inner = self
             .session
             .declare_publisher(key_expr)
@@ -117,7 +137,7 @@ impl<'b, T: Serialize> TypedPublisherBuilder<'_, 'b, T> {
     }
 }
 
-impl<'b, T: Serialize> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
+impl<'b, T: Serialize + TypedSchema> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
     type Output = ZResult<TypedPublisher<'b, T>>;
     type IntoFuture = Ready<Self::Output>;
 
@@ -127,13 +147,13 @@ impl<'b, T: Serialize> IntoFuture for TypedPublisherBuilder<'_, 'b, T> {
 }
 
 /// Builder for [`TypedSubscriber`].
-pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize> {
+pub struct TypedSubscriberBuilder<'a, 'b, T: Deserialize + TypedSchema> {
     session: &'a Session,
     key_expr: ZResult<KeyExpr<'b>>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Deserialize> TypedSubscriberBuilder<'_, '_, T> {
+impl<T: Deserialize + TypedSchema> TypedSubscriberBuilder<'_, '_, T> {
     fn build(self) -> ZResult<TypedSubscriber<T>> {
         let key_expr = self.key_expr?;
         let inner = self.session.declare_subscriber(key_expr).wait()?;
@@ -144,7 +164,7 @@ impl<T: Deserialize> TypedSubscriberBuilder<'_, '_, T> {
     }
 }
 
-impl<T: Deserialize> IntoFuture for TypedSubscriberBuilder<'_, '_, T> {
+impl<T: Deserialize + TypedSchema> IntoFuture for TypedSubscriberBuilder<'_, '_, T> {
     type Output = ZResult<TypedSubscriber<T>>;
     type IntoFuture = Ready<Self::Output>;
 
@@ -156,7 +176,7 @@ impl<T: Deserialize> IntoFuture for TypedSubscriberBuilder<'_, '_, T> {
 /// Extension trait for [`Session`] to declare typed publishers and subscribers.
 pub trait TypedSessionExt {
     /// Declare a [`TypedPublisher`] for the given key expression.
-    fn declare_typed_publisher<'b, T: Serialize, TryIntoKeyExpr>(
+    fn declare_typed_publisher<'b, T: Serialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedPublisherBuilder<'_, 'b, T>
@@ -165,7 +185,7 @@ pub trait TypedSessionExt {
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<Error>;
 
     /// Declare a [`TypedSubscriber`] for the given key expression.
-    fn declare_typed_subscriber<'b, T: Deserialize, TryIntoKeyExpr>(
+    fn declare_typed_subscriber<'b, T: Deserialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedSubscriberBuilder<'_, 'b, T>
@@ -175,7 +195,7 @@ pub trait TypedSessionExt {
 }
 
 impl TypedSessionExt for Session {
-    fn declare_typed_publisher<'b, T: Serialize, TryIntoKeyExpr>(
+    fn declare_typed_publisher<'b, T: Serialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedPublisherBuilder<'_, 'b, T>
@@ -190,7 +210,7 @@ impl TypedSessionExt for Session {
         }
     }
 
-    fn declare_typed_subscriber<'b, T: Deserialize, TryIntoKeyExpr>(
+    fn declare_typed_subscriber<'b, T: Deserialize + TypedSchema, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> TypedSubscriberBuilder<'_, 'b, T>

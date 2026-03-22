@@ -66,7 +66,7 @@ pub use crate::serialization::{
     ZReadIter, ZSerializer,
 };
 pub use crate::typed::{
-    TypedPublisher, TypedPublisherBuilder, TypedSessionExt, TypedSubscriber,
+    TypedPublisher, TypedPublisherBuilder, TypedSchema, TypedSessionExt, TypedSubscriber,
     TypedSubscriberBuilder,
 };
 #[cfg(feature = "unstable")]
