@@ -307,10 +307,8 @@ impl IntoFuture for EventSubscriberBuilder<'_, '_> {
 #[cfg(feature = "unstable")]
 struct EventSubscriberState {
     bookmark: CursorBookmark,
-    persistence_key: String,
     last_flushed: Option<Timestamp>,
     session: WeakSession,
-    persister: Arc<dyn CursorPersister>,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,10 +319,21 @@ struct EventSubscriberState {
 ///
 /// Provides `recv_async()`, `try_recv()`, `cursor_position()`,
 /// `flush_cursor()`, and `flush_interval()` methods.
+///
+/// # Timestamp requirements
+///
+/// Cursor advancement relies on HLC timestamps attached to samples. Samples
+/// without timestamps are delivered to the consumer but **do not advance the
+/// cursor**. After a restart, un-timestamped samples that were already
+/// processed may be replayed. Enable timestamping on the session
+/// (`config.timestamping.enabled = true`) to ensure all samples carry HLC
+/// timestamps.
 #[zenoh_macros::unstable]
 pub struct EventSubscriber {
     receiver: flume::Receiver<Sample>,
     state: Arc<Mutex<EventSubscriberState>>,
+    persistence_key: String,
+    persister: Arc<dyn CursorPersister>,
     _subscriber: Subscriber<()>,
     _flush_task: Option<tokio::task::JoinHandle<()>>,
     flush_interval: Duration,
@@ -339,7 +348,7 @@ impl Drop for EventSubscriber {
         }
 
         // Best-effort synchronous flush so cursor progress isn't lost on clean shutdown
-        Self::do_flush_sync(&self.state);
+        Self::do_flush_sync(&self.state, &self.persistence_key, &self.persister);
     }
 }
 
@@ -412,17 +421,18 @@ impl EventSubscriber {
 
         let state = Arc::new(Mutex::new(EventSubscriberState {
             bookmark,
-            persistence_key: persistence_key.clone(),
             last_flushed: None,
             session: session.downgrade(),
-            persister,
         }));
 
-        let flush_handle = Self::spawn_auto_flush(flush_interval, &state);
+        let flush_handle =
+            Self::spawn_auto_flush(flush_interval, &state, &persistence_key, &persister);
 
         Ok(EventSubscriber {
             receiver,
             state,
+            persistence_key,
+            persister,
             _subscriber: subscriber,
             _flush_task: flush_handle,
             flush_interval,
@@ -517,6 +527,13 @@ impl EventSubscriber {
 
     /// Drain the live buffer, deduplicating against catch-up samples, and send
     /// remaining samples to the receiver channel.
+    ///
+    /// Dedup is timestamp-only: a live sample is suppressed if its timestamp is
+    /// `<=` the last catch-up timestamp. Two different samples on different key
+    /// expressions with the same timestamp could result in one being suppressed.
+    /// This is an acceptable tradeoff — HLC timestamps include a unique ID
+    /// component, so same-timestamp collisions require sub-NTP-resolution
+    /// publishing from multiple peers.
     fn transition_to_live(
         live_buffer: &Arc<Mutex<VecDeque<Sample>>>,
         last_catchup_ts: Option<Timestamp>,
@@ -545,15 +562,21 @@ impl EventSubscriber {
     fn spawn_auto_flush(
         flush_interval: Duration,
         state: &Arc<Mutex<EventSubscriberState>>,
+        persistence_key: &str,
+        persister: &Arc<dyn CursorPersister>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let flush_state = state.clone();
+        let flush_key = persistence_key.to_string();
+        let flush_persister = persister.clone();
         let rt = tokio::runtime::Handle::try_current();
         match rt {
             Ok(handle) => Some(handle.spawn(async move {
                 loop {
                     tokio::time::sleep(flush_interval).await;
-                    // best_effort = true: auto-flush logs and swallows persist errors
-                    if let Err(e) = Self::do_flush_async(&flush_state, false).await {
+                    if let Err(e) =
+                        Self::do_flush_async(&flush_state, &flush_key, &flush_persister, false)
+                            .await
+                    {
                         warn!("EventSubscriber auto-flush failed: {e}");
                     }
                 }
@@ -601,17 +624,19 @@ impl EventSubscriber {
     /// Returns an error if the persistence backend fails. Use this when you
     /// need confirmation that the cursor was durably written.
     pub async fn flush_cursor(&self) -> ZResult<()> {
-        Self::do_flush_async(&self.state, true).await
+        Self::do_flush_async(&self.state, &self.persistence_key, &self.persister, true).await
     }
 
-    /// `best_effort = false` propagates persist errors to the caller.
-    /// `best_effort = true` logs and swallows errors (used by auto-flush).
+    /// `propagate_error = true` returns persist errors to the caller.
+    /// `propagate_error = false` logs and swallows errors (used by auto-flush).
     async fn do_flush_async(
         state: &Arc<Mutex<EventSubscriberState>>,
+        persistence_key: &str,
+        persister: &Arc<dyn CursorPersister>,
         propagate_error: bool,
     ) -> ZResult<()> {
         // Extract data needed for persist under the lock, then drop before await
-        let (zbytes, persistence_key, current, session, persister) = {
+        let (zbytes, current, session) = {
             let lock = zlock!(state);
             let current = lock.bookmark.cursor_position();
 
@@ -621,14 +646,12 @@ impl EventSubscriber {
             }
 
             let zbytes: ZBytes = z_serialize(&lock.bookmark);
-            let persistence_key = lock.persistence_key.clone();
             let session = lock.session.clone();
-            let persister = lock.persister.clone();
-            (zbytes, persistence_key, current, session, persister)
+            (zbytes, current, session)
             // lock dropped here
         };
 
-        match persister.persist(&session, &persistence_key, zbytes).await {
+        match persister.persist(&session, persistence_key, zbytes).await {
             Ok(()) => {}
             Err(e) => {
                 if propagate_error {
@@ -649,8 +672,12 @@ impl EventSubscriber {
     }
 
     /// Synchronous best-effort flush for use in Drop. Never panics.
-    fn do_flush_sync(state: &Arc<Mutex<EventSubscriberState>>) {
-        let (zbytes, persistence_key, current, session, persister) = {
+    fn do_flush_sync(
+        state: &Arc<Mutex<EventSubscriberState>>,
+        persistence_key: &str,
+        persister: &Arc<dyn CursorPersister>,
+    ) {
+        let (zbytes, current, session) = {
             let Ok(lock) = state.lock() else { return };
             let current = lock.bookmark.cursor_position();
 
@@ -659,14 +686,12 @@ impl EventSubscriber {
             }
 
             let zbytes: ZBytes = z_serialize(&lock.bookmark);
-            let persistence_key = lock.persistence_key.clone();
             let session = lock.session.clone();
-            let persister = lock.persister.clone();
-            (zbytes, persistence_key, current, session, persister)
+            (zbytes, current, session)
         };
 
         // Best-effort: ignore errors (session may already be closed)
-        let _ = persister.persist_sync(&session, &persistence_key, zbytes);
+        let _ = persister.persist_sync(&session, persistence_key, zbytes);
 
         if let Ok(mut lock) = state.lock() {
             lock.last_flushed = current;
@@ -677,6 +702,7 @@ impl EventSubscriber {
 /// Future returned by [`EventSubscriber::recv_async`].
 ///
 /// Advances the cursor when a sample is successfully received.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 #[zenoh_macros::unstable]
 pub struct EventRecvFut<'a> {
     inner: flume::r#async::RecvFut<'a, Sample>,
