@@ -679,3 +679,153 @@ async fn zenoh_namespace_queryable_get_routed_clients() -> ZResult<()> {
     ));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Per-namespace connection limits (Issue #44)
+// ---------------------------------------------------------------------------
+
+/// Helper: create a router config with max_connections set.
+async fn get_router_config_with_max_connections(
+    port: u16,
+    max_connections: usize,
+) -> zenoh_config::Config {
+    let mut config = zenoh_config::Config::default();
+    config.set_mode(Some(WhatAmI::Router)).unwrap();
+    config
+        .listen
+        .endpoints
+        .set(vec![format!("tcp/127.0.0.1:{port}").parse().unwrap()])
+        .unwrap();
+    config.scouting.multicast.set_enabled(Some(false)).unwrap();
+    // Set the per-namespace connection limit.
+    config
+        .insert_json5("max_connections", &max_connections.to_string())
+        .unwrap();
+    config
+}
+
+/// Helper: create a basic client config pointing at the given port.
+async fn get_client_config(port: u16) -> zenoh_config::Config {
+    let mut config = zenoh_config::Config::default();
+    config.set_mode(Some(WhatAmI::Client)).unwrap();
+    config
+        .connect
+        .set_endpoints(ModeDependentValue::Unique(vec![
+            format!("tcp/127.0.0.1:{port}").parse().unwrap(),
+        ]))
+        .unwrap();
+    config.scouting.multicast.set_enabled(Some(false)).unwrap();
+    config
+}
+
+/// When max_connections is set to 2, a 3rd client connection must be rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_max_connections_rejects_excess() -> ZResult<()> {
+    zenoh_util::init_log_from_env_or("error");
+
+    let router_config = get_router_config_with_max_connections(19201, 2).await;
+    let _router = ztimeout!(zenoh::open(router_config)).unwrap();
+
+    // First two clients should connect successfully.
+    let _client1 = ztimeout!(zenoh::open(get_client_config(19201).await)).unwrap();
+    let _client2 = ztimeout!(zenoh::open(get_client_config(19201).await)).unwrap();
+
+    // Third client must be rejected because max_connections=2.
+    let result = ztimeout!(zenoh::open(get_client_config(19201).await));
+    assert!(
+        result.is_err(),
+        "Expected 3rd connection to be rejected when max_connections=2"
+    );
+
+    // Clean up.
+    ztimeout!(_client1.close()).unwrap();
+    ztimeout!(_client2.close()).unwrap();
+    ztimeout!(_router.close()).unwrap();
+    Ok(())
+}
+
+/// When max_connections is not set (default), any number of clients can connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_no_max_connections_unlimited() -> ZResult<()> {
+    zenoh_util::init_log_from_env_or("error");
+
+    // Router WITHOUT max_connections — default unlimited.
+    let mut router_config = zenoh_config::Config::default();
+    router_config.set_mode(Some(WhatAmI::Router)).unwrap();
+    router_config
+        .listen
+        .endpoints
+        .set(vec!["tcp/127.0.0.1:19202".parse().unwrap()])
+        .unwrap();
+    router_config
+        .scouting
+        .multicast
+        .set_enabled(Some(false))
+        .unwrap();
+
+    let _router = ztimeout!(zenoh::open(router_config)).unwrap();
+
+    // Connect 4 clients — all should succeed.
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let client = ztimeout!(zenoh::open(get_client_config(19202).await)).unwrap();
+        clients.push(client);
+    }
+
+    // Clean up.
+    for client in clients {
+        ztimeout!(client.close()).unwrap();
+    }
+    ztimeout!(_router.close()).unwrap();
+    Ok(())
+}
+
+/// The admin space should expose active_connections and max_connections.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_max_connections_admin_status() -> ZResult<()> {
+    zenoh_util::init_log_from_env_or("error");
+
+    let router_config = get_router_config_with_max_connections(19203, 5).await;
+    let router = ztimeout!(zenoh::open(router_config)).unwrap();
+
+    // Connect one client.
+    let client = ztimeout!(zenoh::open(get_client_config(19203).await)).unwrap();
+
+    tokio::time::sleep(SLEEP).await;
+
+    // Query admin space for router info — admin keys are @/{zid}/{whatami}
+    let replies = ztimeout!(router.get("@/**")).unwrap();
+
+    let mut found_connections_info = false;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result() {
+            let payload = sample
+                .payload()
+                .try_to_string()
+                .unwrap_or_default()
+                .to_string();
+            if payload.contains("active_connections") {
+                found_connections_info = true;
+                assert!(
+                    payload.contains("\"active_connections\":1")
+                        || payload.contains("\"active_connections\": 1"),
+                    "Expected active_connections to be 1, got: {payload}"
+                );
+                assert!(
+                    payload.contains("\"max_connections\":5")
+                        || payload.contains("\"max_connections\": 5"),
+                    "Expected max_connections to be 5, got: {payload}"
+                );
+            }
+        }
+    }
+    assert!(
+        found_connections_info,
+        "Admin space should expose active_connections and max_connections"
+    );
+
+    // Clean up.
+    ztimeout!(client.close()).unwrap();
+    ztimeout!(router.close()).unwrap();
+    Ok(())
+}

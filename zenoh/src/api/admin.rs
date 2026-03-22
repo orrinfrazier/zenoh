@@ -336,4 +336,17 @@ pub(crate) fn on_admin_query(
             reply(match_prefix, reply_prefix, &ke_link, &query, &link_json);
         }
     }
+
+    // Connection status summary
+    if let Some(runtime) = session.runtime().static_runtime() {
+        let mut conn_json = serde_json::json!({
+            "active_connections": runtime.active_connections_count(),
+        });
+        if let Some(max) = runtime.max_connections() {
+            conn_json["max_connections"] = serde_json::json!(max);
+        }
+        // SAFETY: "connections" is a valid key expression (no wildcards or special chars).
+        let ke_connections = unsafe { keyexpr::from_str_unchecked("connections") };
+        reply(match_prefix, reply_prefix, ke_connections, &query, &conn_json);
+    }
 }
