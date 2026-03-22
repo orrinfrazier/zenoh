@@ -345,7 +345,8 @@ pub(crate) fn on_admin_query(
         if let Some(max) = runtime.max_connections() {
             conn_json["max_connections"] = serde_json::json!(max);
         }
-        // SAFETY: "connections" is a valid key expression (no wildcards or special chars).
+        // SAFETY: "connections" is a static ASCII string that matches the keyexpr
+        // grammar (alphanumeric, no wildcards `*`/`**`, no `$` prefix).
         let ke_connections = unsafe { keyexpr::from_str_unchecked("connections") };
         reply(match_prefix, reply_prefix, ke_connections, &query, &conn_json);
     }
