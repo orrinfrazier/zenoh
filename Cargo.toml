@@ -53,6 +53,7 @@ members = [
   "zenoh",
   "zenoh-ext",
   "zenoh-ext/examples",
+  "zenoh-rpc",
   "zenohd",
 ]
 resolver = "2"
@@ -218,6 +219,7 @@ zenoh-core = { version = "=1.8.0", path = "commons/zenoh-core" }
 zenoh-crypto = { version = "=1.8.0", path = "commons/zenoh-crypto" }
 zenoh-examples = { version = "=1.8.0", path = "examples", default-features = false }
 zenoh-ext = { version = "=1.8.0", path = "zenoh-ext", default-features = false }
+zenoh-rpc = { version = "=1.8.0", path = "zenoh-rpc", default-features = false }
 zenoh-keyexpr = { version = "=1.8.0", path = "commons/zenoh-keyexpr", default-features = false }
 zenoh-link = { version = "=1.8.0", path = "io/zenoh-link" }
 zenoh-link-commons = { version = "=1.8.0", path = "io/zenoh-link-commons" }

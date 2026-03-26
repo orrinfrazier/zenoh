@@ -1,0 +1,51 @@
+#
+# Copyright (c) 2023 ZettaScale Technology
+#
+# This program and the accompanying materials are made available under the
+# terms of the Eclipse Public License 2.0 which is available at
+# http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
+# which is available at https://www.apache.org/licenses/LICENSE-2.0.
+#
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+#
+# Contributors:
+#   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
+#
+[package]
+authors = { workspace = true }
+categories = { workspace = true }
+description = "Zenoh: Typed RPC service layer."
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+name = "zenoh-rpc"
+repository = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[features]
+default = ["zenoh/default"]
+unstable = ["zenoh/internal", "zenoh/unstable"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "sync",
+  "time",
+] }
+tracing = { workspace = true }
+zenoh = { workspace = true, default-features = false }
+zenoh-ext = { workspace = true, default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+zenoh-config = { workspace = true }
+zenoh-util = { workspace = true }
+
+[package.metadata.docs.rs]
+features = ["unstable"]

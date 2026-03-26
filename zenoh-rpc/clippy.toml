@@ -1,0 +1,2 @@
+# clippy configuration for zenoh-rpc
+# Add crate-specific clippy overrides here when needed.

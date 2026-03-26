@@ -6517,6 +6517,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenoh-rpc"
+version = "1.8.0"
+dependencies = [
+ "async-trait",
+ "tokio",
+ "tracing",
+ "zenoh",
+ "zenoh-config",
+ "zenoh-ext",
+ "zenoh-util",
+]
+
+[[package]]
 name = "zenoh-runtime"
 version = "1.8.0"
 dependencies = [
