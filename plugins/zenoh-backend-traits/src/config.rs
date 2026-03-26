@@ -79,6 +79,18 @@ pub struct ReplicaConfig {
     pub hot: u64,
     pub warm: u64,
     pub propagation_delay: Duration,
+    /// Number of events per batch in `AlignmentReply::RetrievalBatch` during alignment.
+    /// This is a performance tuning parameter and does NOT need to match across replicas.
+    pub batch_size: usize,
+    /// Capacity of the bloom filter used for fast key membership checks in the replication log.
+    /// If `None`, defaults to 4,194,304 (~5MB). For event-heavy workloads with unique-key
+    /// patterns, consider increasing this value.
+    /// This does NOT need to match across replicas.
+    pub bloom_filter_capacity: Option<usize>,
+    /// False positive rate of the bloom filter, in per-mille (1 = 0.1%, 10 = 1%, 50 = 5%).
+    /// If `None`, defaults to 10 (1%). Must be between 1 and 999 inclusive.
+    /// This does NOT need to match across replicas.
+    pub bloom_filter_fp_rate_permille: Option<u16>,
 }
 
 impl StructVersion for VolumeConfig {
@@ -149,6 +161,16 @@ impl Default for ReplicaConfig {
             //
             // ⚠️ THIS VALUE SHOULD BE THE SAME FOR ALL REPLICAS.
             propagation_delay: Duration::from_millis(250),
+            // The number of events per batch in `AlignmentReply::RetrievalBatch` during
+            // alignment retrieval. Higher values reduce the number of replies (and serialization
+            // overhead) but increase per-reply payload size.
+            //
+            // Unlike other fields, this value does NOT need to match across replicas.
+            batch_size: 100,
+            // Bloom filter settings default to None, meaning the hardcoded defaults in
+            // LogLatest::new will be used (capacity=4_194_304, fp_rate=0.01).
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate_permille: None,
         }
     }
 }
@@ -684,6 +706,64 @@ impl StorageConfig {
                         bail!(
                             "Invalid type for field `warm` in `replica_config` of storage `{}`. \
                              Only integer values are accepted.",
+                            plugin_name
+                        )
+                    }
+                }
+                if let Some(p) = s.get("batch_size") {
+                    let p = p.to_string().parse::<usize>();
+                    if let Ok(p) = p {
+                        if p == 0 {
+                            bail!(
+                                "Invalid value for field `batch_size` in `replica_config` of \
+                                 storage `{}`. Value must be greater than 0.",
+                                plugin_name
+                            )
+                        }
+                        replication.batch_size = p;
+                    } else {
+                        bail!(
+                            "Invalid type for field `batch_size` in `replica_config` of \
+                             storage `{}`. Only integer values are accepted.",
+                            plugin_name
+                        )
+                    }
+                }
+                if let Some(p) = s.get("bloom_filter_capacity") {
+                    let p = p.to_string().parse::<usize>();
+                    if let Ok(p) = p {
+                        if p == 0 {
+                            bail!(
+                                "Invalid value for field `bloom_filter_capacity` in \
+                                 `replica_config` of storage `{}`. Value must be greater than 0.",
+                                plugin_name
+                            )
+                        }
+                        replication.bloom_filter_capacity = Some(p);
+                    } else {
+                        bail!(
+                            "Invalid type for field `bloom_filter_capacity` in `replica_config` \
+                             of storage `{}`. Only integer values are accepted.",
+                            plugin_name
+                        )
+                    }
+                }
+                if let Some(p) = s.get("bloom_filter_fp_rate_permille") {
+                    let p = p.to_string().parse::<u16>();
+                    if let Ok(p) = p {
+                        if p == 0 || p >= 1000 {
+                            bail!(
+                                "Invalid value for field `bloom_filter_fp_rate_permille` in \
+                                 `replica_config` of storage `{}`. Value must be between 1 and \
+                                 999 (per-mille, e.g. 10 = 1%).",
+                                plugin_name
+                            )
+                        }
+                        replication.bloom_filter_fp_rate_permille = Some(p);
+                    } else {
+                        bail!(
+                            "Invalid type for field `bloom_filter_fp_rate_permille` in \
+                             `replica_config` of storage `{}`. Only integer values are accepted.",
                             plugin_name
                         )
                     }

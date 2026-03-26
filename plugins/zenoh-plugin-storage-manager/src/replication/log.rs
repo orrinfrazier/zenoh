@@ -340,18 +340,18 @@ impl LogLatest {
         prefix: Option<OwnedKeyExpr>,
         replica_config: ReplicaConfig,
     ) -> Self {
+        // Default: 2 << 22 = 4_194_304 items, ~5MB per storage with replication enabled.
+        let bloom_capacity = replica_config.bloom_filter_capacity.unwrap_or(2 << 22);
+        // Default: 10 permille = 1% false positive rate.
+        let bloom_fp_rate = replica_config
+            .bloom_filter_fp_rate_permille
+            .map(|p| f64::from(p) / 1000.0)
+            .unwrap_or(0.01);
+
         Self {
             configuration: Configuration::new(storage_key_expr, prefix, replica_config),
             intervals: BTreeMap::default(),
-            // TODO Should these be configurable?
-            //
-            //      With their current values, the bloom filter structure will consume ~5MB. Note
-            //      that this applies for each Storage that has replication enabled (hence, if a
-            //      node has two Storage that have replication enabled, ~10MB of memory will be
-            //      consumed on that node).
-            //
-            // 2 << 22 = 4_194_304 items.
-            bloom_filter_event: Bloom::new_for_fp_rate(2 << 22, 0.01),
+            bloom_filter_event: Bloom::new_for_fp_rate(bloom_capacity, bloom_fp_rate),
         }
     }
 
