@@ -37,6 +37,8 @@
 //! The [`AdvancedPublisher`] and [`AdvancedSubscriber`] provide advanced pub/sub
 //! functionalities, including support for message history, recovery, and more.
 #[cfg(feature = "unstable")]
+mod ack_put;
+#[cfg(feature = "unstable")]
 mod advanced_cache;
 #[cfg(feature = "unstable")]
 mod advanced_publisher;
@@ -58,6 +60,8 @@ mod subscriber_ext;
 #[cfg(feature = "unstable")]
 mod utils;
 
+#[cfg(feature = "unstable")]
+pub use crate::ack_put::{ack_delete, ack_put, StorageInsertionResult};
 #[cfg(feature = "internal")]
 pub use crate::serialization::VarInt;
 pub use crate::serialization::{
