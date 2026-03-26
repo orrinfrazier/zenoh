@@ -29,7 +29,7 @@ maintenance = { status = "actively-developed" }
 [features]
 default = ["zenoh/default"]
 internal = []
-unstable = ["zenoh/internal", "zenoh/unstable"]
+unstable = ["zenoh/internal", "zenoh/unstable", "dep:zenoh_backend_traits"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -48,12 +48,15 @@ tokio = { workspace = true, features = [
 tracing = { workspace = true }
 uhlc = { workspace = true }
 zenoh = { workspace = true, default-features = false }
+zenoh_backend_traits = { workspace = true, optional = true }
 zenoh-macros = { workspace = true }
 zenoh-util = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
 zenoh-config = { workspace = true }
+zenoh-plugin-storage-manager = { path = "../plugins/zenoh-plugin-storage-manager" }
+zenoh-plugin-trait = { workspace = true }
 
 [package.metadata.docs.rs]
 features = ["unstable"]

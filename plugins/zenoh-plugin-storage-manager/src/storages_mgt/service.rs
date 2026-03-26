@@ -558,6 +558,112 @@ impl StorageService {
 
         let prefix = self.configuration.strip_prefix.as_ref();
 
+        // Handle acknowledged put/delete operations
+        let is_ack_put = q.parameters().get("_ack_put").is_some_and(|v| v == "true");
+        let is_ack_delete = q
+            .parameters()
+            .get("_ack_delete")
+            .is_some_and(|v| v == "true");
+
+        if is_ack_put || is_ack_delete {
+            if is_ack_put && q.payload().is_none() {
+                if let Err(e) = q
+                    .reply_err(ZBytes::from("_ack_put requires a payload"))
+                    .await
+                {
+                    tracing::warn!(
+                        "Storage '{}' failed to send error reply for missing payload: {}",
+                        self.name,
+                        e
+                    );
+                }
+                return;
+            }
+
+            let stripped_key = match crate::strip_prefix(prefix, q.key_expr()) {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    if let Err(reply_err) = q.reply_err(ZBytes::from(format!("{e}"))).await {
+                        tracing::warn!(
+                            "Storage '{}' failed to send error reply for strip_prefix: {}",
+                            self.name,
+                            reply_err
+                        );
+                    }
+                    return;
+                }
+            };
+
+            let timestamp = self.session.new_timestamp();
+            let action = if is_ack_put {
+                Action::Put
+            } else {
+                Action::Delete
+            };
+            let event = Event::new(stripped_key.clone(), timestamp, &action);
+
+            let mut storage = self.storage.lock().await;
+
+            let result = if is_ack_put {
+                let payload = q.payload().expect("validated above");
+                let encoding = q.encoding().cloned().unwrap_or_default();
+                storage
+                    .put(stripped_key, payload.clone(), encoding, timestamp)
+                    .await
+            } else {
+                storage.delete(stripped_key, timestamp).await
+            };
+
+            drop(storage);
+
+            let op = if is_ack_put { "ack_put" } else { "ack_delete" };
+            match result {
+                Ok(insertion_result) => {
+                    tracing::debug!(
+                        "[STORAGE] {} on '{}': {:?}",
+                        op,
+                        q.key_expr(),
+                        insertion_result
+                    );
+
+                    // Update cache_latest so subsequent reads see the ack write,
+                    // mirroring the process_sample path (lines 316-358).
+                    if !matches!(insertion_result, StorageInsertionResult::Outdated)
+                        && self.capability.history == History::Latest
+                    {
+                        let mut cache_guard = self.cache_latest.latest_updates.write().await;
+                        cache_guard.insert(event.log_key(), event);
+                    }
+
+                    if let Err(e) = q
+                        .reply(q.key_expr().clone(), [insertion_result as u8])
+                        .await
+                    {
+                        tracing::warn!(
+                            "Storage '{}' raised an error replying to {}: {}",
+                            self.name,
+                            op,
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Storage '{}' raised an error on {}: {}", self.name, op, e);
+                    if let Err(reply_err) = q.reply_err(ZBytes::from(format!("{e}"))).await {
+                        tracing::warn!(
+                            "Storage '{}' failed to send error reply for {}: {}",
+                            self.name,
+                            op,
+                            reply_err
+                        );
+                    }
+                }
+            }
+
+            return;
+        }
+
         if q.key_expr().is_wild() {
             // resolve key expr into individual keys
             let matching_keys = self.get_matching_keys(q.key_expr()).await;
