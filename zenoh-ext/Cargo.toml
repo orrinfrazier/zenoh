@@ -53,6 +53,7 @@ zenoh-macros = { workspace = true }
 zenoh-util = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 rand = { workspace = true }
 zenoh-config = { workspace = true }
 zenoh-plugin-storage-manager = { path = "../plugins/zenoh-plugin-storage-manager" }
