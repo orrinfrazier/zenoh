@@ -56,6 +56,8 @@ mod publication_cache;
 mod publisher_ext;
 #[cfg(feature = "unstable")]
 mod querying_subscriber;
+#[cfg(feature = "unstable")]
+mod rpc;
 mod serialization;
 #[cfg(feature = "unstable")]
 mod session_ext;
@@ -74,9 +76,9 @@ pub use crate::serialization::{
     ZReadIter, ZSerializer,
 };
 pub use crate::typed::{
-    TypedGetFuture, TypedPublisher, TypedPublisherBuilder, TypedQuery, TypedQueryable,
-    TypedQueryableBuilder, TypedReceiveError, TypedSchema, TypedSessionExt, TypedSubscriber,
-    TypedSubscriberBuilder,
+    TypedGetError, TypedGetFuture, TypedPublisher, TypedPublisherBuilder, TypedQuery,
+    TypedQueryable, TypedQueryableBuilder, TypedReceiveError, TypedSchema, TypedSessionExt,
+    TypedSubscriber, TypedSubscriberBuilder,
 };
 #[cfg(feature = "unstable")]
 #[allow(deprecated)]
@@ -97,6 +99,11 @@ pub use crate::{
     },
     publication_cache::{PublicationCache, PublicationCacheBuilder},
     publisher_ext::AdvancedPublisherBuilderExt,
+    rpc::{
+        deadline_attachment, DeadlineContext, MethodHandler, ServiceClient, ServiceError,
+        ServiceServer, ServiceServerBuilder, StatusCode, DEADLINE_ATTACHMENT_KEY,
+        METHOD_ATTACHMENT_KEY,
+    },
     querying_subscriber::{
         ExtractSample, FetchingSubscriber, FetchingSubscriberBuilder, KeySpace, LivelinessSpace,
         QueryingSubscriberBuilder, UserSpace,
