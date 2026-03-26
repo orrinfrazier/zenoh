@@ -153,6 +153,16 @@ impl Default for ReplicaConfig {
     }
 }
 
+// Per-prefix lifespan override for garbage collection.
+// When `delete_data` is true, GC deletes actual data (not just tombstones) for keys matching the
+// prefix whose timestamp is older than `lifespan`.
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct PrefixLifespan {
+    pub key_expr: OwnedKeyExpr,
+    pub lifespan: Duration,
+    pub delete_data: bool,
+}
+
 // The configuration for periodic garbage collection of metadata in storage manager
 #[derive(JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct GarbageCollectionConfig {
@@ -161,6 +171,8 @@ pub struct GarbageCollectionConfig {
     pub period: Duration,
     // The metadata older than this parameter will be garbage collected
     pub lifespan: Duration,
+    // Optional per-prefix lifespan overrides
+    pub prefix_lifespans: Option<Vec<PrefixLifespan>>,
 }
 
 impl Default for GarbageCollectionConfig {
@@ -168,6 +180,7 @@ impl Default for GarbageCollectionConfig {
         Self {
             period: Duration::from_secs(30),
             lifespan: Duration::from_secs(86400),
+            prefix_lifespans: None,
         }
     }
 }
@@ -556,6 +569,69 @@ impl StorageConfig {
                             plugin_name
                         )
                     }
+                }
+                match s.get("prefix_lifespans") {
+                    Some(Value::Array(entries)) => {
+                        let mut prefix_lifespans = Vec::with_capacity(entries.len());
+                        for entry in entries {
+                            let ke_str = entry
+                                .get("key_expr")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    zerror!(
+                                        "Each entry in `prefix_lifespans` of \
+                                         `garbage_collection` of storage `{}` must have a \
+                                         string `key_expr` field",
+                                        plugin_name
+                                    )
+                                })?;
+                            let ke = match keyexpr::new(ke_str) {
+                                Ok(ke) => ke.to_owned(),
+                                Err(e) => bail!(
+                                    "key_expr='{}' in `prefix_lifespans` is not a valid \
+                                     key-expression: {}",
+                                    ke_str,
+                                    e
+                                ),
+                            };
+                            let lifespan_secs = entry
+                                .get("lifespan")
+                                .ok_or_else(|| {
+                                    zerror!(
+                                        "Each entry in `prefix_lifespans` of \
+                                         `garbage_collection` of storage `{}` must have a \
+                                         `lifespan` field",
+                                        plugin_name
+                                    )
+                                })?
+                                .to_string()
+                                .parse::<u64>()
+                                .map_err(|_| {
+                                    zerror!(
+                                        "Invalid type for field `lifespan` in \
+                                         `prefix_lifespans` of `garbage_collection` of \
+                                         storage `{}`. Only integer values are accepted.",
+                                        plugin_name
+                                    )
+                                })?;
+                            let delete_data = entry
+                                .get("delete_data")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            prefix_lifespans.push(PrefixLifespan {
+                                key_expr: ke,
+                                lifespan: Duration::from_secs(lifespan_secs),
+                                delete_data,
+                            });
+                        }
+                        garbage_collection_config.prefix_lifespans = Some(prefix_lifespans);
+                    }
+                    Some(_) => bail!(
+                        "`prefix_lifespans` field in `garbage_collection` of storage `{}` \
+                         must be an array",
+                        plugin_name
+                    ),
+                    None => {}
                 }
                 garbage_collection_config
             }

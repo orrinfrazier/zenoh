@@ -38,7 +38,7 @@ use zenoh::{
 };
 use zenoh_backend_traits::{
     config::{GarbageCollectionConfig, StorageConfig},
-    Capability, History, StorageInsertionResult, StoredData,
+    Capability, History, Storage, StorageInsertionResult, StoredData,
 };
 
 use super::LatestUpdates;
@@ -129,6 +129,7 @@ impl StorageService {
             gc_config.period,
             GarbageCollectionEvent {
                 config: gc_config,
+                storage: self.storage.clone(),
                 wildcard_deletes: self.wildcard_deletes.clone(),
                 wildcard_puts: self.wildcard_puts.clone(),
                 latest_updates,
@@ -168,6 +169,9 @@ impl StorageService {
         );
 
         tokio::task::spawn(async move {
+            // Keep the Timer alive for the duration of the event loop so GC
+            // periodic events continue to fire.
+            let _gc_timer = t;
             loop {
                 tokio::select!(
                     // on sample for key_expr
@@ -660,6 +664,7 @@ impl StorageService {
 // Periodic event cleaning-up data info for old metadata
 struct GarbageCollectionEvent {
     config: GarbageCollectionConfig,
+    storage: Arc<Mutex<Box<dyn Storage>>>,
     wildcard_deletes: Arc<RwLock<KeBoxTree<Update, UnknownWildness, KeyedSetProvider>>>,
     wildcard_puts: Arc<RwLock<KeBoxTree<Update, UnknownWildness, KeyedSetProvider>>>,
     latest_updates: Option<Arc<RwLock<LatestUpdates>>>,
@@ -669,7 +674,7 @@ struct GarbageCollectionEvent {
 impl Timed for GarbageCollectionEvent {
     async fn run(&mut self) {
         tracing::trace!("Start garbage collection");
-        let time_limit = NTP64::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap())
+        let time_limit = NTP64::from(SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before UNIX epoch"))
             - NTP64::from(self.config.lifespan);
 
         // Get lock on fields
@@ -701,12 +706,426 @@ impl Timed for GarbageCollectionEvent {
         }
 
         if let Some(latest_updates) = &self.latest_updates {
-            latest_updates
-                .write()
-                .await
-                .retain(|_, event| event.timestamp().get_time() < &time_limit);
+            if let Some(prefix_lifespans) = &self.config.prefix_lifespans {
+                // Pre-compute time limits per prefix (Finding 3: avoid per-key SystemTime::now)
+                let now = NTP64::from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap(),
+                );
+                let prefix_limits: Vec<_> = prefix_lifespans
+                    .iter()
+                    .map(|pl| (pl, now - NTP64::from(pl.lifespan)))
+                    .collect();
+
+                let mut latest = latest_updates.write().await;
+                let mut keys_to_remove = Vec::new();
+                // Collect storage deletes to batch after releasing cache lock (Finding 2)
+                let mut storage_deletes: Vec<(OwnedKeyExpr, Timestamp)> = Vec::new();
+
+                for (log_key, event) in latest.iter() {
+                    let mut matched = false;
+                    if let Some(stripped_key) = event.key_expr() {
+                        for (pl, prefix_time_limit) in &prefix_limits {
+                            if pl.key_expr.intersects(stripped_key) {
+                                matched = true;
+                                if event.timestamp().get_time() < prefix_time_limit {
+                                    if pl.delete_data {
+                                        storage_deletes.push((
+                                            stripped_key.clone(),
+                                            *event.timestamp(),
+                                        ));
+                                    }
+                                    keys_to_remove.push(log_key.clone());
+                                }
+                                break; // first matching prefix wins
+                            }
+                        }
+                    }
+                    // Finding 1: non-matching keys (and None-keyed) still get default
+                    // tombstone cleanup
+                    if !matched && event.timestamp().get_time() < &time_limit {
+                        keys_to_remove.push(log_key.clone());
+                    }
+                }
+
+                for key in &keys_to_remove {
+                    latest.remove(key);
+                }
+                drop(latest);
+
+                // Batch-delete from storage without holding cache write lock
+                if !storage_deletes.is_empty() {
+                    let mut storage = self.storage.lock().await;
+                    for (key, ts) in storage_deletes {
+                        if let Err(e) = storage.delete(Some(key.clone()), ts).await {
+                            tracing::warn!(
+                                "Prefix GC: failed to delete key '{}': {e}",
+                                key
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Default behavior: clean up old metadata based on global lifespan
+                latest_updates
+                    .write()
+                    .await
+                    .retain(|_, event| event.timestamp().get_time() >= &time_limit);
+            }
         }
 
         tracing::trace!("End garbage collection of obsolete data-infos");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use uhlc::{HLC, NTP64};
+    use zenoh::key_expr::OwnedKeyExpr;
+    use zenoh_backend_traits::config::PrefixLifespan;
+    use zenoh_plugin_trait::Plugin;
+
+    use crate::memory_backend::MemoryBackend;
+    use crate::replication::{Action, Event};
+    use crate::storages_mgt::LatestUpdates;
+
+    fn old_timestamp(age: Duration) -> zenoh::time::Timestamp {
+        let hlc = HLC::default();
+        let past = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            - age;
+        zenoh::time::Timestamp::new(NTP64::from(past), *hlc.get_id())
+    }
+
+    async fn make_memory_storage() -> Arc<Mutex<Box<dyn zenoh_backend_traits::Storage>>> {
+        let volume_config = zenoh_backend_traits::config::VolumeConfig {
+            name: "memory".into(),
+            backend: None,
+            paths: None,
+            required: false,
+            rest: Default::default(),
+        };
+        let volume = MemoryBackend::start("memory", &volume_config).unwrap();
+        let storage_config = zenoh_backend_traits::config::StorageConfig {
+            name: "test-storage".into(),
+            key_expr: "test/**".try_into().unwrap(),
+            complete: false,
+            strip_prefix: None,
+            volume_id: "memory".into(),
+            volume_cfg: Default::default(),
+            garbage_collection_config: GarbageCollectionConfig::default(),
+            replication: None,
+        };
+        let storage = volume.create_storage(storage_config).await.unwrap();
+        Arc::new(Mutex::new(storage))
+    }
+
+    #[tokio::test]
+    async fn test_gc_deletes_matching_prefix_keys() {
+        let storage = make_memory_storage().await;
+
+        // Put an event key with a 3-day-old timestamp
+        let event_key: OwnedKeyExpr = "devices/42/events/abc123".try_into().unwrap();
+        let old_ts = old_timestamp(Duration::from_secs(3 * 86400));
+        {
+            let mut s = storage.lock().await;
+            s.put(
+                Some(event_key.clone()),
+                zenoh::bytes::ZBytes::default(),
+                zenoh::bytes::Encoding::default(),
+                old_ts,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Create latest_updates cache with the event
+        let latest_updates: Arc<RwLock<LatestUpdates>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let event = Event::new(Some(event_key.clone()), old_ts, &Action::Put);
+        latest_updates
+            .write()
+            .await
+            .insert(event.log_key(), event);
+
+        // GC config with 48h prefix lifespan for events (key is 3 days old, should be GC'd)
+        let gc_config = GarbageCollectionConfig {
+            period: Duration::from_secs(30),
+            lifespan: Duration::from_secs(86400),
+            prefix_lifespans: Some(vec![PrefixLifespan {
+                key_expr: "**/events/**".try_into().unwrap(),
+                lifespan: Duration::from_secs(48 * 3600),
+                delete_data: true,
+            }]),
+        };
+
+        let mut gc_event = GarbageCollectionEvent {
+            config: gc_config,
+            storage: storage.clone(),
+            wildcard_deletes: Arc::new(RwLock::new(KeBoxTree::default())),
+            wildcard_puts: Arc::new(RwLock::new(KeBoxTree::default())),
+            latest_updates: Some(latest_updates.clone()),
+        };
+
+        gc_event.run().await;
+
+        // Verify: event key deleted from storage
+        let mut s = storage.lock().await;
+        let result = s.get(Some(event_key), "").await;
+        assert!(
+            result.is_err(),
+            "Event key should have been deleted from storage"
+        );
+
+        // Verify: cache should not contain the event
+        assert!(
+            latest_updates.read().await.is_empty(),
+            "Event should have been removed from cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gc_preserves_non_matching_keys() {
+        let storage = make_memory_storage().await;
+
+        // Put an entity state key with a 3-day-old timestamp
+        let state_key: OwnedKeyExpr = "devices/42/status".try_into().unwrap();
+        let old_ts = old_timestamp(Duration::from_secs(3 * 86400));
+        {
+            let mut s = storage.lock().await;
+            s.put(
+                Some(state_key.clone()),
+                zenoh::bytes::ZBytes::from(b"online".to_vec()),
+                zenoh::bytes::Encoding::default(),
+                old_ts,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Create latest_updates cache with the entity state event
+        let latest_updates: Arc<RwLock<LatestUpdates>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let event = Event::new(Some(state_key.clone()), old_ts, &Action::Put);
+        latest_updates
+            .write()
+            .await
+            .insert(event.log_key(), event);
+
+        // GC config with prefix lifespan ONLY for events — status keys should NOT match
+        let gc_config = GarbageCollectionConfig {
+            period: Duration::from_secs(30),
+            lifespan: Duration::from_secs(86400),
+            prefix_lifespans: Some(vec![PrefixLifespan {
+                key_expr: "**/events/**".try_into().unwrap(),
+                lifespan: Duration::from_secs(48 * 3600),
+                delete_data: true,
+            }]),
+        };
+
+        let mut gc_event = GarbageCollectionEvent {
+            config: gc_config,
+            storage: storage.clone(),
+            wildcard_deletes: Arc::new(RwLock::new(KeBoxTree::default())),
+            wildcard_puts: Arc::new(RwLock::new(KeBoxTree::default())),
+            latest_updates: Some(latest_updates.clone()),
+        };
+
+        gc_event.run().await;
+
+        // Verify: state key still exists in storage (NOT deleted by prefix GC)
+        let mut s = storage.lock().await;
+        let result = s.get(Some(state_key), "").await;
+        assert!(
+            result.is_ok(),
+            "Entity state key should NOT have been deleted from storage"
+        );
+
+        // Note: the cache entry IS cleaned by default tombstone GC (the entry is older
+        // than the default lifespan). This is correct — only STORAGE data is preserved
+        // for non-matching keys. Metadata cleanup still applies.
+    }
+
+    #[tokio::test]
+    async fn test_gc_delete_data_false_removes_cache_preserves_storage() {
+        let storage = make_memory_storage().await;
+
+        // Put an event key with a 3-day-old timestamp
+        let event_key: OwnedKeyExpr = "devices/42/events/abc123".try_into().unwrap();
+        let old_ts = old_timestamp(Duration::from_secs(3 * 86400));
+        {
+            let mut s = storage.lock().await;
+            s.put(
+                Some(event_key.clone()),
+                zenoh::bytes::ZBytes::from(b"payload".to_vec()),
+                zenoh::bytes::Encoding::default(),
+                old_ts,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Create latest_updates cache with the event
+        let latest_updates: Arc<RwLock<LatestUpdates>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let event = Event::new(Some(event_key.clone()), old_ts, &Action::Put);
+        latest_updates
+            .write()
+            .await
+            .insert(event.log_key(), event);
+
+        // GC config with delete_data: false — should remove cache entry but NOT storage data
+        let gc_config = GarbageCollectionConfig {
+            period: Duration::from_secs(30),
+            lifespan: Duration::from_secs(86400),
+            prefix_lifespans: Some(vec![PrefixLifespan {
+                key_expr: "**/events/**".try_into().unwrap(),
+                lifespan: Duration::from_secs(48 * 3600),
+                delete_data: false,
+            }]),
+        };
+
+        let mut gc_event = GarbageCollectionEvent {
+            config: gc_config,
+            storage: storage.clone(),
+            wildcard_deletes: Arc::new(RwLock::new(KeBoxTree::default())),
+            wildcard_puts: Arc::new(RwLock::new(KeBoxTree::default())),
+            latest_updates: Some(latest_updates.clone()),
+        };
+
+        gc_event.run().await;
+
+        // Verify: cache entry removed
+        assert!(
+            latest_updates.read().await.is_empty(),
+            "Cache entry should have been removed"
+        );
+
+        // Verify: storage data preserved (delete_data is false)
+        let mut s = storage.lock().await;
+        let result = s.get(Some(event_key), "").await;
+        assert!(
+            result.is_ok(),
+            "Storage data should be preserved when delete_data is false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gc_first_matching_prefix_wins() {
+        let storage = make_memory_storage().await;
+
+        // Put an event key with a 2-day-old timestamp
+        let event_key: OwnedKeyExpr = "devices/42/events/abc123".try_into().unwrap();
+        let old_ts = old_timestamp(Duration::from_secs(2 * 86400));
+        {
+            let mut s = storage.lock().await;
+            s.put(
+                Some(event_key.clone()),
+                zenoh::bytes::ZBytes::from(b"payload".to_vec()),
+                zenoh::bytes::Encoding::default(),
+                old_ts,
+            )
+            .await
+            .unwrap();
+        }
+
+        let latest_updates: Arc<RwLock<LatestUpdates>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let event = Event::new(Some(event_key.clone()), old_ts, &Action::Put);
+        latest_updates
+            .write()
+            .await
+            .insert(event.log_key(), event);
+
+        // Two overlapping prefixes: first has 3-day lifespan (key is 2 days old, NOT expired),
+        // second has 1-day lifespan (key IS expired). First match wins → key should survive.
+        let gc_config = GarbageCollectionConfig {
+            period: Duration::from_secs(30),
+            lifespan: Duration::from_secs(86400),
+            prefix_lifespans: Some(vec![
+                PrefixLifespan {
+                    key_expr: "**/events/**".try_into().unwrap(),
+                    lifespan: Duration::from_secs(3 * 86400),
+                    delete_data: true,
+                },
+                PrefixLifespan {
+                    key_expr: "devices/**".try_into().unwrap(),
+                    lifespan: Duration::from_secs(86400),
+                    delete_data: true,
+                },
+            ]),
+        };
+
+        let mut gc_event = GarbageCollectionEvent {
+            config: gc_config,
+            storage: storage.clone(),
+            wildcard_deletes: Arc::new(RwLock::new(KeBoxTree::default())),
+            wildcard_puts: Arc::new(RwLock::new(KeBoxTree::default())),
+            latest_updates: Some(latest_updates.clone()),
+        };
+
+        gc_event.run().await;
+
+        // Verify: first prefix matched (**/events/**) with 3-day lifespan,
+        // key is only 2 days old, so it should NOT be GC'd
+        assert_eq!(
+            latest_updates.read().await.len(),
+            1,
+            "Key should survive — first matching prefix has 3-day lifespan"
+        );
+
+        let mut s = storage.lock().await;
+        let result = s.get(Some(event_key), "").await;
+        assert!(
+            result.is_ok(),
+            "Storage data should be preserved — first matching prefix wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gc_default_behavior_no_prefix_lifespans() {
+        let storage = make_memory_storage().await;
+
+        // Put a key in storage
+        let key: OwnedKeyExpr = "devices/42/status".try_into().unwrap();
+        let old_ts = old_timestamp(Duration::from_secs(3 * 86400));
+        {
+            let mut s = storage.lock().await;
+            s.put(
+                Some(key.clone()),
+                zenoh::bytes::ZBytes::default(),
+                zenoh::bytes::Encoding::default(),
+                old_ts,
+            )
+            .await
+            .unwrap();
+        }
+
+        // GC config WITHOUT prefix_lifespans (default)
+        let gc_config = GarbageCollectionConfig::default();
+
+        let mut gc_event = GarbageCollectionEvent {
+            config: gc_config,
+            storage: storage.clone(),
+            wildcard_deletes: Arc::new(RwLock::new(KeBoxTree::default())),
+            wildcard_puts: Arc::new(RwLock::new(KeBoxTree::default())),
+            latest_updates: Some(Arc::new(RwLock::new(HashMap::new()))),
+        };
+
+        gc_event.run().await;
+
+        // Verify: storage data is NOT deleted (default GC only cleans metadata)
+        let mut s = storage.lock().await;
+        let result = s.get(Some(key), "").await;
+        assert!(
+            result.is_ok(),
+            "Default GC should NOT delete storage data"
+        );
     }
 }
