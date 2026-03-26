@@ -21,7 +21,7 @@ use zenoh::{
     query::Query,
 };
 
-use super::aligner_reply::AlignmentReply;
+use super::aligner_reply::{AlignmentReply, RetrievalItem};
 use crate::replication::{
     classification::{IntervalIdx, SubIntervalIdx},
     core::Replication,
@@ -62,6 +62,9 @@ pub(crate) enum AlignmentQuery {
     SubIntervals(HashMap<IntervalIdx, HashSet<SubIntervalIdx>>),
     /// Request the Payload associated with the provided EventMetadata.
     Events(Vec<EventMetadata>),
+    /// Request the Payloads associated with the provided EventMetadata, signaling that the
+    /// requester supports batched replies via `AlignmentReply::RetrievalBatch`.
+    EventsBatch(Vec<EventMetadata>),
 }
 
 impl Replication {
@@ -168,6 +171,18 @@ impl Replication {
                     self.reply_event_retrieval(&query, event_to_retrieve).await;
                 }
             }
+            AlignmentQuery::EventsBatch(events_to_retrieve) => {
+                tracing::trace!("Processing `AlignmentQuery::EventsBatch`");
+                let batch_size = self
+                    .replication_log
+                    .read()
+                    .await
+                    .configuration()
+                    .batch_size;
+                for chunk in chunk_events_for_batch_retrieval(&events_to_retrieve, batch_size) {
+                    self.reply_event_retrieval_batch(&query, chunk).await;
+                }
+            }
         }
     }
 
@@ -264,6 +279,62 @@ impl Replication {
         reply_to_query(query, reply, None).await;
     }
 
+    /// Fetches the payload associated with the given [EventMetadata] from the appropriate source.
+    ///
+    /// Returns `Some((payload, encoding))` for `Put` and `WildcardPut` actions, or `None` for
+    /// `Delete` and `WildcardDelete` actions. Returns `None` if the data cannot be found.
+    async fn fetch_event_payload(
+        &self,
+        event: &EventMetadata,
+    ) -> Option<Option<(ZBytes, Encoding)>> {
+        match &event.action {
+            Action::Delete | Action::WildcardDelete(_) => Some(None),
+            Action::Put => {
+                let stored_data = {
+                    let mut storage = self.storage_service.storage.lock().await;
+                    match storage.get(event.stripped_key.clone(), "").await {
+                        Ok(stored_data) => stored_data,
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to retrieve data associated to key < {:?} >: {e:?}",
+                                event.key_expr()
+                            );
+                            return None;
+                        }
+                    }
+                };
+
+                let requested_data = stored_data
+                    .into_iter()
+                    .find(|data| data.timestamp == *event.timestamp());
+                match requested_data {
+                    Some(data) => Some(Some((data.payload, data.encoding))),
+                    None => {
+                        tracing::debug!(
+                            "Found no data in the Storage associated to key < {:?} > with a \
+                             Timestamp equal to: {}",
+                            event.key_expr(),
+                            event.timestamp()
+                        );
+                        None
+                    }
+                }
+            }
+            Action::WildcardPut(wildcard_ke) => {
+                let wildcard_puts_guard = self.storage_service.wildcard_puts.read().await;
+
+                if let Some(update) = wildcard_puts_guard.weight_at(wildcard_ke) {
+                    Some(Some((update.payload().clone(), update.encoding().clone())))
+                } else {
+                    tracing::error!(
+                        "Ignoring Wildcard Update < {wildcard_ke} >: found no associated `Update`."
+                    );
+                    None
+                }
+            }
+        }
+    }
+
     /// Replies to the [Query] with the [EventMetadata] and [Value] identified as missing.
     ///
     /// Depending on the associated action, this method will fetch the [Value] either from the
@@ -273,66 +344,55 @@ impl Replication {
         query: &Query,
         event_to_retrieve: EventMetadata,
     ) {
-        let value = match &event_to_retrieve.action {
-            // For a Delete or WildcardDelete there is no associated `Value`.
-            Action::Delete | Action::WildcardDelete(_) => None,
-            // For a Put we need to retrieve the `Value` in the Storage.
-            Action::Put => {
-                let stored_data = {
-                    let mut storage = self.storage_service.storage.lock().await;
-                    match storage
-                        .get(event_to_retrieve.stripped_key.clone(), "")
-                        .await
-                    {
-                        Ok(stored_data) => stored_data,
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to retrieve data associated to key < {:?} >: {e:?}",
-                                event_to_retrieve.key_expr()
-                            );
-                            return;
-                        }
-                    }
-                };
-
-                let requested_data = stored_data
-                    .into_iter()
-                    .find(|data| data.timestamp == *event_to_retrieve.timestamp());
-                match requested_data {
-                    Some(data) => Some((data.payload, data.encoding)),
-                    None => {
-                        // NOTE: This is not necessarily an error. There is a possibility that the
-                        //       data associated with this specific key was updated between the time
-                        //       the [AlignmentQuery] was sent and when it is processed.
-                        //
-                        //       Hence, at the time it was "valid" but it no longer is.
-                        tracing::debug!(
-                            "Found no data in the Storage associated to key < {:?} > with a \
-                             Timestamp equal to: {}",
-                            event_to_retrieve.key_expr(),
-                            event_to_retrieve.timestamp()
-                        );
-                        return;
-                    }
-                }
-            }
-            // For a WildcardPut we need to retrieve the `Value` in the `StorageService`.
-            Action::WildcardPut(wildcard_ke) => {
-                let wildcard_puts_guard = self.storage_service.wildcard_puts.read().await;
-
-                if let Some(update) = wildcard_puts_guard.weight_at(wildcard_ke) {
-                    Some((update.payload().clone(), update.encoding().clone()))
-                } else {
-                    tracing::error!(
-                        "Ignoring Wildcard Update < {wildcard_ke} >: found no associated `Update`."
-                    );
-                    return;
-                }
-            }
+        let Some(value) = self.fetch_event_payload(&event_to_retrieve).await else {
+            return;
         };
-
         reply_to_query(query, AlignmentReply::Retrieval(event_to_retrieve), value).await;
     }
+
+    /// Replies to the [Query] with a batch of [RetrievalItem]s for the given chunk of events.
+    ///
+    /// For each event in the chunk, the payload is fetched via [fetch_event_payload] and packed
+    /// into a single `AlignmentReply::RetrievalBatch` reply.
+    pub(crate) async fn reply_event_retrieval_batch(
+        &self,
+        query: &Query,
+        events: &[EventMetadata],
+    ) {
+        let mut items = Vec::with_capacity(events.len());
+
+        for event in events {
+            let Some(value) = self.fetch_event_payload(event).await else {
+                continue;
+            };
+
+            let (payload, encoding) = match value {
+                Some((p, e)) => (Some(p.to_bytes().to_vec()), Some(e.to_string().into_bytes())),
+                None => (None, None),
+            };
+
+            items.push(RetrievalItem {
+                event_metadata: event.clone(),
+                payload,
+                encoding,
+            });
+        }
+
+        reply_to_query(query, AlignmentReply::RetrievalBatch(items), None).await;
+    }
+}
+
+/// Chunks a slice of [EventMetadata] into sub-slices of at most `batch_size` elements.
+///
+/// Returns an empty `Vec` if the input is empty.
+pub(crate) fn chunk_events_for_batch_retrieval(
+    events: &[EventMetadata],
+    batch_size: usize,
+) -> Vec<&[EventMetadata]> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+    events.chunks(batch_size).collect()
 }
 
 /// Replies to a Query, adding the [AlignmentReply] as an attachment and, if provided, the payload
@@ -361,3 +421,7 @@ async fn reply_to_query(query: &Query, reply: AlignmentReply, value: Option<(ZBy
         tracing::error!("Failed to reply to Query: {e:?}");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/aligner_query.test.rs"]
+mod tests;

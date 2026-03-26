@@ -74,7 +74,10 @@ Actual message: {err}",
             sub_intervals: 4,
             hot: 6,
             warm: 60,
-            propagation_delay: Duration::from_millis(250)
+            propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate_permille: None,
         })
     );
 }
@@ -258,4 +261,161 @@ fn test_prefix_lifespan_missing_lifespan_field() {
         err.to_string().contains("lifespan"),
         "Error should mention lifespan: {err}"
     );
+}
+
+// --- Piece 1: batch_size config tests ---
+
+#[test]
+fn piece1_batch_size_defaults_to_100() {
+    let config = ReplicaConfig::default();
+    assert_eq!(
+        config.batch_size, 100,
+        "ReplicaConfig::default().batch_size should be 100"
+    );
+}
+
+#[test]
+fn piece1_batch_size_parseable_from_json_config() {
+    let config_with_batch_size = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "batch_size": 50,
+        }
+    });
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config_with_batch_size).unwrap();
+    let replica = storage_config.replication.expect("replication config should be Some");
+    assert_eq!(
+        replica.batch_size, 50,
+        "batch_size should be parsed from JSON config"
+    );
+}
+
+#[test]
+fn piece1_batch_size_uses_default_when_omitted_in_json() {
+    let config_without_batch_size = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {}
+    });
+    let storage_config =
+        StorageConfig::try_from("test-plugin", "test-storage", &config_without_batch_size).unwrap();
+    let replica = storage_config.replication.expect("replication config should be Some");
+    assert_eq!(
+        replica.batch_size, 100,
+        "batch_size should default to 100 when not specified in JSON"
+    );
+}
+
+#[test]
+fn piece1_batch_size_zero_is_rejected() {
+    let config_with_zero_batch_size = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "batch_size": 0,
+        }
+    });
+    let result = StorageConfig::try_from(
+        "test-plugin",
+        "test-storage",
+        &config_with_zero_batch_size,
+    );
+    assert!(
+        result.is_err(),
+        "batch_size of 0 should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("must be greater than 0"),
+        "Error should mention the constraint: {}",
+        err
+    );
+}
+
+// --- bloom filter config tests ---
+
+#[test]
+fn bloom_filter_fields_default_to_none() {
+    let config = ReplicaConfig::default();
+    assert_eq!(config.bloom_filter_capacity, None);
+    assert_eq!(config.bloom_filter_fp_rate_permille, None);
+}
+
+#[test]
+fn bloom_filter_capacity_parseable_from_json() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_capacity": 1000000,
+        }
+    });
+    let storage = StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let replica = storage.replication.unwrap();
+    assert_eq!(replica.bloom_filter_capacity, Some(1_000_000));
+}
+
+#[test]
+fn bloom_filter_fp_rate_permille_parseable_from_json() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate_permille": 5,
+        }
+    });
+    let storage = StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let replica = storage.replication.unwrap();
+    assert_eq!(replica.bloom_filter_fp_rate_permille, Some(5));
+}
+
+#[test]
+fn bloom_filter_capacity_zero_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_capacity": 0,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fp_rate_permille_zero_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate_permille": 0,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fp_rate_permille_1000_rejected() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {
+            "bloom_filter_fp_rate_permille": 1000,
+        }
+    });
+    assert!(StorageConfig::try_from("test-plugin", "test-storage", &config).is_err());
+}
+
+#[test]
+fn bloom_filter_fields_absent_means_none() {
+    let config = json!({
+        "key_expr": "test/**",
+        "volume": "memory",
+        "replication": {}
+    });
+    let storage = StorageConfig::try_from("test-plugin", "test-storage", &config).unwrap();
+    let replica = storage.replication.unwrap();
+    assert_eq!(replica.bloom_filter_capacity, None);
+    assert_eq!(replica.bloom_filter_fp_rate_permille, None);
 }

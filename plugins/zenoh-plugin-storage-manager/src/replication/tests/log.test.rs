@@ -54,6 +54,9 @@ fn test_insert() {
             hot: 1,
             warm: 5,
             propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate_permille: None,
         },
     );
 
@@ -118,6 +121,9 @@ fn test_digest() {
             hot: 1,
             warm: 5,
             propagation_delay: Duration::from_millis(250),
+            batch_size: 100,
+            bloom_filter_capacity: None,
+            bloom_filter_fp_rate_permille: None,
         },
     );
 
