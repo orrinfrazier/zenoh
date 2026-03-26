@@ -696,11 +696,13 @@ impl IngressAclEnforcer {
 
 pub(crate) fn acl_interceptor_factories(
     acl_config: &AclConfig,
+    namespace: Option<zenoh_keyexpr::OwnedNonWildKeyExpr>,
 ) -> ZResult<Vec<InterceptorFactory>> {
     let mut res: Vec<InterceptorFactory> = vec![];
 
     if acl_config.enabled {
         let mut policy_enforcer = PolicyEnforcer::new();
+        policy_enforcer.namespace = namespace;
         match policy_enforcer.init(acl_config) {
             Ok(_) => {
                 tracing::debug!("Access control is enabled");
@@ -979,7 +981,7 @@ pub trait AclActionMethods {
         let policy_enforcer = self.policy_enforcer();
         let authn_ids = self.authn_ids();
         let zid = self.zid();
-        let mut decision = policy_enforcer.default_permission;
+        let mut decision = policy_enforcer.namespace_aware_default(key_expr);
         for subject in authn_ids {
             match policy_enforcer.policy_decision_point(subject.id, self.flow(), action, key_expr) {
                 Ok(Permission::Allow) => {
