@@ -61,6 +61,7 @@ mod serialization;
 mod session_ext;
 #[cfg(feature = "unstable")]
 mod subscriber_ext;
+mod typed;
 #[cfg(feature = "unstable")]
 mod utils;
 
@@ -71,6 +72,11 @@ pub use crate::serialization::VarInt;
 pub use crate::serialization::{
     z_deserialize, z_serialize, Deserialize, Serialize, ZDeserializeError, ZDeserializer,
     ZReadIter, ZSerializer,
+};
+pub use crate::typed::{
+    TypedGetFuture, TypedPublisher, TypedPublisherBuilder, TypedQuery, TypedQueryable,
+    TypedQueryableBuilder, TypedReceiveError, TypedSchema, TypedSessionExt, TypedSubscriber,
+    TypedSubscriberBuilder,
 };
 #[cfg(feature = "unstable")]
 #[allow(deprecated)]
